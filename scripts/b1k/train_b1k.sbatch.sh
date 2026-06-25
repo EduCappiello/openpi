@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name="openpi_train"
+#SBATCH --job-name="b1k_openpi_train"
 #SBATCH --account=viscam
-#SBATCH --partition=sc-loprio
+#SBATCH --partition=viscam
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:h200:4
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=32
 #SBATCH --time=2-00:00:00
-#SBATCH --output=outputs/sc/openpi_%j.log
-#SBATCH --error=outputs/sc/openpi_%j.log
+#SBATCH --output=outputs/viscam/openpi_%j.log
+#SBATCH --error=outputs/viscam/openpi_%j.log
 
 # Calculate total GPUs across all nodes
 NUM_GPUS=$((${SLURM_GPUS_ON_NODE:-1} * ${SLURM_NNODES:-1}))
@@ -26,24 +26,25 @@ echo "SLURM_NNODES"=$SLURM_NNODES
 echo "SLURM_NTASKS_PER_NODE"=$SLURM_NTASKS_PER_NODE
 echo "working directory="$SLURM_SUBMIT_DIR
 
-source /vision/u/$(whoami)/libs/openpi/.venv/bin/activate
+source /viscam/u/shiyuc/openpi/.venv/bin/activate
 
-CONFIG_NAME=${1:-pi05_s2rg_droid_real}
+CONFIG_NAME=${1:-pi05_b1k}
 if [ $# -gt 0 ]; then
     shift
 fi
 
-EXP_NAME=${EXP_NAME:-${CONFIG_NAME}_sc_lowprio}
+EXP_NAME=${EXP_NAME:-${CONFIG_NAME}_viscam}
 
 echo "Current time: $(date)"
 echo "CONFIG_NAME=$CONFIG_NAME"
 echo "EXP_NAME=$EXP_NAME"
 echo "Running with args: $@"
 
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/b1k/train_b1k.py "$CONFIG_NAME" \
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run --no-sync scripts/b1k/train_b1k.py "$CONFIG_NAME" \
     --exp_name="$EXP_NAME" \
     --resume \
     --batch_size=64 \
+    --num_train_steps=100000
     "$@"
 
 echo "Job finished."

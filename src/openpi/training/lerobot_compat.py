@@ -15,4 +15,11 @@ __all__ = ["LeRobotDataset", "LeRobotDatasetMetadata", "MultiLeRobotDataset", "t
 
 
 def tasks_from_metadata(metadata: Any) -> dict[int, str]:
-    return metadata.tasks
+    tasks = metadata.tasks
+    if isinstance(tasks, dict):
+        return tasks
+    # New LeRobot DataFrame, index is task name, task_index is in column
+    import pandas as pd
+    if isinstance(tasks, pd.DataFrame):
+        return {int(row["task_index"]): str(task_name) for task_name, row in tasks.iterrows()}
+    raise TypeError(f"Unsupported tasks type: {type(tasks)}")
