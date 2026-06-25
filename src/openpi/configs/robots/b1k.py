@@ -10,19 +10,19 @@ R1Pro = RobotConfig(
         "image_0": ObservationConfig(
             name="head",
             obs_key="robot::robot:zed_link:Camera:0::rgb",
-            dataset_key="observation.rgb.head",
+            dataset_key="observation.rgb.zed_link_camera_0",
             resolution=[240, 240]
         ),
         "image_1": ObservationConfig(
             name="left_wrist",
             obs_key="robot::robot:left_realsense_link:Camera:0::rgb",
-            dataset_key="observation.rgb.left_wrist",
+            dataset_key="observation.rgb.left_realsense_link_camera_0",
             resolution=[240, 240]
         ),
         "image_2": ObservationConfig(
             name="right_wrist",
             obs_key="robot::robot:right_realsense_link:Camera:0::rgb",
-            dataset_key="observation.rgb.right_wrist",
+            dataset_key="observation.rgb.right_realsense_link_camera_0",
             resolution=[240, 240]
         ),
     },

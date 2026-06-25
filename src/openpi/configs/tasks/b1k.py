@@ -8,6 +8,7 @@ TASKS = {
     "books": "Place the basket onto the table, and put the two books from the shelf into the basket.",
     "popcorn": "Pick up the red popcorn bag from the shelf and place it into the microwave.",
     "bread": "Retrieve the bowl from the drawer, put the two bread in from the plate, and place the bowl on the right side of the countertop.",
+    "turning_on_radio": "Turn on the radio receiver that's on the table in the living room.",
 }
 
 # Register in global registry
