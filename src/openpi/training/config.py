@@ -361,6 +361,27 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
+# --- BEHAVIOR-1K 2026 challenge demos (lerobot v3.0) ---------------------------------
+# The repo holds 100 tasks x 200 episodes; task t occupies episodes [200t, 200t+200).
+# 3.26 TB total, and lerobot 0.4.4 downloads rather than streams, so we stage the first
+# B1K_EPISODES_PER_TASK episodes of every task (~198 GB with depth streams dropped).
+# Overridable so a smoke test can run against a couple of tasks.
+B1K_REPO_ID = "behavior-1k/2026-challenge-demos"
+B1K_EPISODES_PER_TASK = int(os.environ.get("B1K_EPISODES_PER_TASK", 30))
+B1K_NUM_TASKS = int(os.environ.get("B1K_NUM_TASKS", 100))
+B1K_VAL_EPISODES_PER_TASK = int(os.environ.get("B1K_VAL_EPISODES_PER_TASK", 3))
+
+B1K_TRAIN_EPISODES = [
+    200 * t + i
+    for t in range(B1K_NUM_TASKS)
+    for i in range(B1K_EPISODES_PER_TASK - B1K_VAL_EPISODES_PER_TASK)
+]
+B1K_VAL_EPISODES = [
+    200 * t + i
+    for t in range(B1K_NUM_TASKS)
+    for i in range(B1K_EPISODES_PER_TASK - B1K_VAL_EPISODES_PER_TASK, B1K_EPISODES_PER_TASK)
+]
+
 @dataclasses.dataclass(frozen=True)
 class LeRobotB1KDataConfig(DataConfigFactory):
 
@@ -373,9 +394,12 @@ class LeRobotB1KDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "observation/egocentric_camera": "observation.images.rgb.head",
-                        "observation/wrist_image_left": "observation.images.rgb.left_wrist",
-                        "observation/wrist_image_right": "observation.images.rgb.right_wrist",
+                        # v3.0 (2026-challenge-demos) key names. Camera roles per
+                        # omnigibson/eval/r1pro.yaml: head=zed_link, wrists=*_realsense_link.
+                        # "observation.images.rgb.*" was the 2025 layout and does not exist in v3.0.
+                        "observation/egocentric_camera": "observation.rgb.zed_link_camera_0",
+                        "observation/wrist_image_left": "observation.rgb.left_realsense_link_camera_0",
+                        "observation/wrist_image_right": "observation.rgb.right_realsense_link_camera_0",
                         "observation/state": "observation.state",
                         "actions": "action",
                         "prompt": "prompt",
@@ -725,27 +749,46 @@ _CONFIGS = [
         project_name="B1K",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=50, paligemma_variant="gemma_2b_lora"),
         data=LeRobotB1KDataConfig(
-            repo_id="behavior-1k/2025-challenge-demos",
+            # 2026 demos (v3.0). In this repo task t occupies episodes [200t, 200t+200);
+            # B1K_TRAIN_EPISODES takes the first N of every task so all 100 tasks are
+            # represented. The full 3.26 TB does not fit locally and lerobot downloads
+            # rather than streams, so the subset is staged on disk -- see B1K_EPISODES_PER_TASK.
+            repo_id=B1K_REPO_ID,
             base_config=DataConfig(
                 prompt_from_task=True,
-                episodes_index=list(range(190)),
-                behavior_dataset_root="/vision/group/behavior/2025-challenge-demos",
+                episodes_index=B1K_TRAIN_EPISODES,
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=50_000,
+        # Default decay_steps is 30k; without this the last 20k steps sit at floor LR.
+        lr_schedule=_optimizer.CosineDecaySchedule(decay_steps=50_000),
         freeze_filter=pi0_config.Pi0Config(
             pi05=True, action_horizon=50, paligemma_variant="gemma_2b_lora"
         ).get_freeze_filter(),
         ema_decay=None,
         val_log_interval=5000,
-        val_repo_id="behavior-1k/2025-challenge-demos",
-        val_episodes_index=list(range(190, 200)),
+        val_repo_id=B1K_REPO_ID,
+        val_episodes_index=B1K_VAL_EPISODES,
         assets_base_dir="./outputs/assets",
         checkpoint_base_dir="./outputs/checkpoints",
-        num_workers=1,
+        # Each checkpoint is ~14 GB. The default keep_period=5000 would pin 10 permanent
+        # checkpoints (~140 GB) over a 50k-step run, which does not fit alongside the
+        # 185 GB staged dataset. 10k keeps 5 milestones (~70 GB) plus the rolling recent one.
+        keep_period=10_000,
+        # Matches the reference run (2x H200, batch 64). Verified to fit on 2x H100 80GB
+        # with the gemma_2b_lora freeze filter; data-parallel over both GPUs (fsdp_devices=1).
+        batch_size=64,
+        # Training is dataloader-bound: batch 64 x 3 cameras x ~0.14s pyav decode. The box
+        # has a 20-CPU cgroup quota (nproc reports 192 and lies), so 14 workers leaves ~6
+        # CPUs for the main process and JAX host work.
+        num_workers=14,
     ),
-    
+
+    #
+    # Wave configs are appended programmatically below (see _make_wave_configs).
+    #
+
     #
     # Fine-tuning Libero configs.
     #
@@ -1079,6 +1122,95 @@ _CONFIGS = [
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")
+
+# --- Wave training configs (generated from b1k_waves/episode_ledger.json) --------------
+#
+# Arm 0 trained on demos 0..29 of every task. Each later "wave" continues from the
+# previous run's FINAL weights on a fresh, disjoint block of episodes, so no frame is
+# ever seen twice across the campaign. The ledger is the single source of truth for
+# which demos each run consumed; these configs are derived from it, so a wave cannot
+# silently drift from what was recorded.
+#
+# One TrainConfig per wave (rather than one config + an env var) is deliberate:
+# TrainConfig.assets_dirs and .checkpoint_dir are both derived from config.name, so a
+# distinct name is what keeps each wave's checkpoints separate. Selecting waves by env
+# var would have made every wave share one assets dir.
+#
+# NORMALIZATION IS FROZEN TO ARM 0 for every wave. norm stats define the input/output
+# scaling the inherited weights were fitted under; recomputing them per wave would shift
+# that scaling underneath a warm-started model and silently corrupt the continuation.
+# Pointing every wave at arm0's assets also skips a costly recompute per wave.
+_B1K_ARM0_ASSETS = AssetsConfig(
+    assets_dir="./outputs/assets/pi05_b1k",
+    asset_id=B1K_REPO_ID,
+)
+
+
+def _b1k_wave_model():
+    return pi0_config.Pi0Config(pi05=True, action_horizon=50, paligemma_variant="gemma_2b_lora")
+
+
+def _make_wave_configs() -> list[TrainConfig]:
+    """Build one TrainConfig per ledger wave, chaining warm starts wave-to-wave."""
+    import json
+
+    ledger_path = pathlib.Path(__file__).parents[3] / "b1k_waves" / "episode_ledger.json"
+    if not ledger_path.exists():
+        return []
+    waves = json.loads(ledger_path.read_text())["waves"]
+
+    configs: list[TrainConfig] = []
+    # Wave 1 continues arm0; each subsequent wave continues its predecessor.
+    prev_params = "./outputs/checkpoints/pi05_b1k/arm0_monolithic/49999/params"
+    for w in waves:
+        if w["name"] == "arm0_monolithic":  # already trained, not a wave run
+            continue
+        steps = int(w.get("num_train_steps", 15_000))
+        name = f"pi05_b1k_{w['name']}"
+        configs.append(
+            TrainConfig(
+                name=name,
+                exp_name=w["name"],
+                project_name="B1K",
+                model=_b1k_wave_model(),
+                data=LeRobotB1KDataConfig(
+                    repo_id=B1K_REPO_ID,
+                    assets=_B1K_ARM0_ASSETS,
+                    base_config=DataConfig(
+                        prompt_from_task=True,
+                        episodes_index=w["train_episodes"],
+                    ),
+                ),
+                # Warm start: params only. CheckpointWeightLoader reads params/ and never
+                # train_state/, so the optimizer state and step counter start clean -- no
+                # stale Adam momentum or LR-schedule position carries across waves.
+                weight_loader=weight_loaders.CheckpointWeightLoader(
+                    os.environ.get("B1K_WARM_START_PARAMS", prev_params)
+                ),
+                num_train_steps=steps,
+                lr_schedule=_optimizer.CosineDecaySchedule(decay_steps=steps),
+                freeze_filter=_b1k_wave_model().get_freeze_filter(),
+                ema_decay=None,
+                val_log_interval=2500,
+                val_repo_id=B1K_REPO_ID,
+                val_episodes_index=w["val_episodes"],
+                assets_base_dir="./outputs/assets",
+                checkpoint_base_dir="./outputs/checkpoints",
+                # Disk is tight. keep_period == num_train_steps pins only the final step
+                # as a milestone; max_to_keep=1 evicts the rolling latest once superseded,
+                # so a wave costs ~1 checkpoint (~13 GB) in steady state, not N.
+                keep_period=steps,
+                save_interval=2500,
+                batch_size=64,
+                num_workers=14,
+            )
+        )
+        prev_params = f"./outputs/checkpoints/{name}/{w['name']}/{steps - 1}/params"
+    return configs
+
+
+_CONFIGS = [*_CONFIGS, *_make_wave_configs()]
+
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
 
 

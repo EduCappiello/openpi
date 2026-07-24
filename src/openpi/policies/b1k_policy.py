@@ -1,11 +1,41 @@
 import dataclasses
+from collections import OrderedDict
 
 import einops
 import numpy as np
 
 from openpi import transforms
 from openpi.models import model as _model
-from omnigibson.learning.utils.eval_utils import PROPRIOCEPTION_INDICES
+
+# Vendored from omnigibson/eval/utils/eval_utils.py (2026 challenge edition) so that
+# training does not import omnigibson (which drags in Isaac Sim and, in this venv,
+# raises ImportError: cannot import name 'DepthEncoderConfig').
+#
+# NOTE: this is the 61-dim 2026 layout, matching `observation.state` in
+# behavior-1k/2026-challenge-demos. The upstream import pointed at
+# omnigibson.learning.utils.eval_utils, which is the *2025* 256-dim layout and is
+# wrong for the 2026 demos.
+PROPRIOCEPTION_INDICES = {
+    "R1Pro": OrderedDict(
+        {
+            "base_qvel": np.s_[0:3],
+            "arm_left_qpos": np.s_[3:10],
+            "arm_left_qvel": np.s_[10:17],
+            "eef_left_pos": np.s_[17:20],
+            "eef_left_quat": np.s_[20:24],
+            "gripper_left_qpos": np.s_[24:26],
+            "gripper_left_qvel": np.s_[26:28],
+            "arm_right_qpos": np.s_[28:35],
+            "arm_right_qvel": np.s_[35:42],
+            "eef_right_pos": np.s_[42:45],
+            "eef_right_quat": np.s_[45:49],
+            "gripper_right_qpos": np.s_[49:51],
+            "gripper_right_qvel": np.s_[51:53],
+            "trunk_qpos": np.s_[53:57],
+            "trunk_qvel": np.s_[57:61],
+        }
+    ),
+}
 
 
 def make_b1k_example() -> dict:

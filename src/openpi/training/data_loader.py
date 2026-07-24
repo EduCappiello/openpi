@@ -1,14 +1,21 @@
 from collections.abc import Iterator, Sequence
+import contextlib
+import hashlib
 import logging
 import multiprocessing
 import os
+import pathlib
+import shutil
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
+import datasets
 import lerobot.datasets.lerobot_dataset as lerobot_dataset
+import lerobot.datasets.utils as lerobot_utils
 import numpy as np
+import pandas as pd
 import torch
 
 import openpi.models.model as _model
@@ -151,6 +158,116 @@ def create_behavior_dataset(data_config: _config.DataConfig, action_horizon: int
     return dataset
 
 
+_VIDEO_BACKEND = "pyav"
+
+# lerobot's default tolerance_s=1e-4 assumes short, per-episode videos. v3.0 packs ~6.6
+# episodes into each mp4, so query timestamps reach ~2200s+, where float32 spacing is
+# 2.4e-4 -- larger than the tolerance -- and decoding dies with FrameTimestampError even
+# though the correct frame was found. 5ms is 10x the worst-case float32 error at 5000s
+# and still only ~30% of a half-frame at 30fps, so it cannot select a neighbouring frame.
+_TOLERANCE_S = 0.005
+
+# The 2026 B1K demos ship 3 RGB + 3 depth video streams per episode, but pi0.5 consumes
+# only the 3 RGB cameras (see LeRobotB1KDataConfig's repack map). Depth is ~half the bytes
+# in the repo, so dropping these keys from the metadata *before* LeRobotDataset resolves
+# which files to fetch halves both download volume and per-sample decode cost.
+_UNUSED_VIDEO_KEY_SUBSTRINGS = ("depth_linear",)
+
+
+# Startup cost, measured on the 2,700-episode subset: LeRobotDataset.load_hf_dataset calls
+# Dataset.from_parquet over *all* 189 data files with an episode `isin` filter, so every
+# process pays a ~30 min single-threaded scan before step 0 -- on every launch, resume and
+# norm-stats run. The result is deterministic for a given (root, episode set, feature set),
+# so we materialize it once and memory-map it thereafter (~seconds).
+_HF_DATASET_CACHE_DIR = pathlib.Path(
+    os.environ.get("B1K_HF_DATASET_CACHE", "/root/.cache/b1k_hf_subset")
+)
+
+
+@contextlib.contextmanager
+def _cached_hf_dataset():
+    """Memory-map a previously materialized hf_dataset instead of re-scanning parquet.
+
+    Keyed by dataset root, the exact episode list and the feature set, so a different
+    subset (e.g. a taxonomy-family split) simply gets its own cache entry rather than
+    silently reusing the wrong rows.
+    """
+    original_load = lerobot_dataset.LeRobotDataset.load_hf_dataset
+
+    def patched_load(self):
+        key_src = repr(
+            (
+                str(self.root),
+                sorted(self.episodes) if self.episodes is not None else None,
+                sorted(self.meta.features),
+            )
+        )
+        key = hashlib.sha256(key_src.encode()).hexdigest()[:16]
+        path = _HF_DATASET_CACHE_DIR / key
+
+        if path.exists():
+            logging.info(f"hf_dataset cache HIT: {path}")
+            hf_dataset = datasets.load_from_disk(str(path))
+        else:
+            logging.info(f"hf_dataset cache MISS, materializing once: {path}")
+            hf_dataset = original_load(self)
+            staging = path.with_name(path.name + ".tmp")
+            if staging.exists():
+                shutil.rmtree(staging)
+            # save_to_disk cannot serialize the python-level transform, so drop it first
+            # and re-apply below (it is re-applied on the cache-hit path too).
+            hf_dataset.reset_format()
+            hf_dataset.save_to_disk(str(staging))
+            staging.rename(path)  # publish atomically so a crash cannot leave a partial cache
+            hf_dataset = datasets.load_from_disk(str(path))
+
+        # NOTE: deliberately returned *without* hf_transform_to_torch. LeRobotDataset.__init__
+        # immediately builds `_absolute_to_relative_idx` by iterating hf_dataset["index"]; with
+        # the torch transform installed that is a python loop calling .item() on 29M tensors,
+        # measured at ~40 min. Left unformatted the same build takes ~8s (284x, mappings
+        # verified identical). patched_init below reinstates the transform once __init__ is
+        # done, so __getitem__ still yields torch tensors.
+        return hf_dataset
+
+    original_init = lerobot_dataset.LeRobotDataset.__init__
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if getattr(self, "hf_dataset", None) is not None:
+            self.hf_dataset.set_transform(lerobot_utils.hf_transform_to_torch)
+
+    lerobot_dataset.LeRobotDataset.load_hf_dataset = patched_load
+    lerobot_dataset.LeRobotDataset.__init__ = patched_init
+    try:
+        yield
+    finally:
+        lerobot_dataset.LeRobotDataset.load_hf_dataset = original_load
+        lerobot_dataset.LeRobotDataset.__init__ = original_init
+
+
+@contextlib.contextmanager
+def _without_unused_video_keys():
+    """Patch LeRobotDatasetMetadata so unused video streams are never fetched or decoded.
+
+    LeRobotDataset builds its own metadata internally and derives `video_keys` from
+    `info["features"]`, so the keys must be removed at construction time.
+    """
+    original_init = lerobot_dataset.LeRobotDatasetMetadata.__init__
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        for key in [
+            k for k in self.info["features"] if any(s in k for s in _UNUSED_VIDEO_KEY_SUBSTRINGS)
+        ]:
+            del self.info["features"][key]
+
+    lerobot_dataset.LeRobotDatasetMetadata.__init__ = patched_init
+    try:
+        yield
+    finally:
+        lerobot_dataset.LeRobotDatasetMetadata.__init__ = original_init
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -161,19 +278,38 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
-        episodes=data_config.episodes_index,
-    )
+    with _without_unused_video_keys(), _cached_hf_dataset():
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+        dataset = lerobot_dataset.LeRobotDataset(
+            data_config.repo_id,
+            delta_timestamps={
+                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            },
+            episodes=data_config.episodes_index,
+            # torchcodec needs system FFmpeg (libavutil), which is absent here; pyav
+            # ships its own. Decode is ~0.14s/sample either way.
+            video_backend=_VIDEO_BACKEND,
+            tolerance_s=_TOLERANCE_S,
+        )
 
     if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+        dataset = TransformedDataset(
+            dataset, [_transforms.PromptFromLeRobotTask(_task_index_to_prompt(dataset_meta.tasks))]
+        )
 
     return dataset
+
+
+def _task_index_to_prompt(tasks) -> dict[int, str]:
+    """Normalize `meta.tasks` to the {task_index: task_string} mapping openpi expects.
+
+    lerobot v2.1 exposed a plain mapping, but v3.0 exposes a pandas DataFrame indexed by
+    task string with a "task_index" column, on which `.get(idx)` silently looks up a
+    *column* and returns None.
+    """
+    if isinstance(tasks, pd.DataFrame):
+        return {int(row.task_index): str(task) for task, row in tasks.iterrows()}
+    return dict(tasks)
 
 
 def create_rlds_dataset(
