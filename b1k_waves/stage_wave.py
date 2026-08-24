@@ -29,10 +29,10 @@ STREAMS = ["zed_link_camera_0", "left_realsense_link_camera_0", "right_realsense
 # Per-file wall-clock budget. Wave files are ~100-210 MB; even at a pessimistic
 # 1 MB/s (far below the 40-130 MB/s measured with parallel workers) that is under
 # 4 minutes, so 6 minutes is a stall detector, not a bandwidth limit.
-PER_FILE_TIMEOUT_S = 360
-MAX_ATTEMPTS = 4
+PER_FILE_TIMEOUT_S = 240
+MAX_ATTEMPTS = 5
 
-os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")  # per-HTTP-request timeout
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "30"
 
 
 def meta():

@@ -11,9 +11,58 @@ measured on this box (see WAVE_TRAINING.md). Checking {checkpoint_dir}/{final_st
 params/ on disk is instant and exactly what orbax itself uses to decide resume vs
 fresh-init (openpi/training/checkpoints.py:initialize_checkpoint_dir).
 """
+"""Ground truth for 'is this wave done' -- reads the checkpoint dir, not the ledger.
+
+The ledger records intent (which demos a wave covers); the filesystem records fact
+(whether training actually finished). The orchestrator trusts the filesystem, and
+syncs the ledger's status field to match on every check so `cat episode_ledger.json`
+stays an accurate human-readable log.
+
+Deliberately does NOT invoke train.py to answer this question: launching the script
+just to discover a no-op costs ~2 minutes of dataset-scan + XLA compile per call,
+measured on this box (see WAVE_TRAINING.md). Checking {checkpoint_dir}/{final_step}/
+params/ on disk is instant and exactly what orbax itself uses to decide resume vs
+fresh-init (openpi/training/checkpoints.py:initialize_checkpoint_dir).
+"""
 import os
 import pathlib
 import sys
+
+# Waves whose final checkpoints live on the prior box / in HF storage and are NOT
+# expected on this pod's filesystem. The orchestrator treats them as complete without
+# a disk check, or it would retrain already-consumed demos.
+# NOTE (2026-08-14): wave1 & wave2 were fully fine-tuned (step 14999) and uploaded to
+# HF (0Corvid0/pi05-b1k-waves, folders wave1_d30_38_38ep / wave2_d38_46_46ep). Their
+# local checkpoints were pruned after upload, so without listing them here the disk-only
+# completeness check below would wrongly report them QUEUED and the orchestrator would
+# re-train already-consumed demos (re-staging ~206 GB and re-hitting EDQUOT). Verified
+# present in HF 2026-08-14. arm0_monolithic is still the pretrained warm-start base and
+# is excluded from the wave loop in next_incomplete_wave() below.
+#
+# NOTE (2026-08-15): wave3 & wave4 were also completed at step 14999 and uploaded to HF
+# (folders wave3_d46_54_54ep / wave4_d54_62_62ep, verified present 2026-08-15). wave3's
+# local checkpoint was pruned by the orchestrator after wave4's upload. Both are listed
+# here so the disk-only check does not re-select an already-consumed wave (the 2026-08-15
+# bug that tried to re-train wave3 after wave4). KEEP THIS SET IN SYNC WITH THE PRUNE
+# GATE IN run_waves.sh -- a wave is only safe to prune once it is recorded here.
+#
+# NOTE (2026-08-19): wave7 & wave8 are also complete (step 14999) and uploaded to HF
+# (folders wave7_d80_90_90ep / wave8_d90_100_100ep, verified present). Their local
+# checkpoints were deleted during disk cleanup (wave8 is re-downloaded from HF by the
+# b1k_families backbone_foundation warm-start). Adding them here prevents the wave
+# orchestrator from re-training wave7/wave8 and keeps the b1k_families gate (families
+# run only after ALL waves COMPLETE) open.
+REMOTE_COMPLETE_WAVES = {
+    "wave1_d30_38",
+    "wave2_d38_46",
+    "wave3_d46_54",
+    "wave4_d54_62",
+    "wave5_d62_70",
+    "wave6_d70_80",
+    "wave7_d80_90",
+    "wave8_d90_100",
+}
+
 
 # TrainConfig.checkpoint_base_dir / assets_base_dir are "./outputs/..." -- relative
 # paths resolved (via .resolve()) against the CURRENT WORKING DIRECTORY at call time,
@@ -34,6 +83,8 @@ def wave_config_name(wave_name):
 
 def is_wave_complete(wave):
     """True iff this wave's final-step checkpoint params/ exist on disk."""
+    if wave["name"] in REMOTE_COMPLETE_WAVES:
+        return True
     name = wave_config_name(wave["name"])
     if name not in C._CONFIGS_DICT:
         return False
@@ -79,6 +130,8 @@ def next_incomplete_wave(d=None):
     d = d or sync_ledger_status()
     for w in d["waves"]:
         if w["name"] == "arm0_monolithic":
+            continue
+        if w["name"] in REMOTE_COMPLETE_WAVES:
             continue
         if "COMPLETE" not in w.get("status", ""):
             return w

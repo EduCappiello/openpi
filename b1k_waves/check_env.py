@@ -46,9 +46,9 @@ def main() -> int:
     if bad:
         print("\nENVIRONMENT BROKEN -- do not launch training:")
         print("\n".join(bad))
-        print('\nFix:\n  cd ~/dev/b1k-baselines/baselines/openpi\n'
-              '  VIRTUAL_ENV=$PWD/.venv ~/.local/bin/uv pip install --no-deps lerobot==0.4.4\n'
-              '  VIRTUAL_ENV=$PWD/.venv ~/.local/bin/uv pip install "datasets>=4.0.0,<5.0.0" "av>=15.0.0,<16.0.0" "numpy==1.26.4"')
+        print('\nFix:\n  cd /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi\n'
+               '  VIRTUAL_ENV=$PWD/.venv ~/.local/bin/uv pip install --no-deps lerobot==0.4.4\n'
+               '  VIRTUAL_ENV=$PWD/.venv ~/.local/bin/uv pip install "datasets>=4.0.0,<5.0.0" "av>=15.0.0,<16.0.0" "numpy==1.26.4"')
         return 1
     print("\nenvironment OK")
     return 0
