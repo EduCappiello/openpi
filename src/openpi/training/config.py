@@ -98,6 +98,12 @@ class DataConfig:
     # Only used for B1K data loader.
     behavior_dataset_root: str | None = None
 
+    # If set, overrides where the standard (non-behavior) LeRobot dataset loader looks for
+    # already-staged data, instead of the default $HF_LEROBOT_HOME/{repo_id}. Unlike
+    # `behavior_dataset_root`, this does NOT trigger the omnigibson-dependent loading path --
+    # it is threaded straight into `lerobot_dataset.LeRobotDataset(..., root=...)`.
+    local_root: str | None = None
+
     # Action space for DROID dataset.
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
     # Path to the data filter file for DROID dataset
@@ -383,6 +389,14 @@ B1K_VAL_EPISODES = [
     for i in range(B1K_EPISODES_PER_TASK - B1K_VAL_EPISODES_PER_TASK, B1K_EPISODES_PER_TASK)
 ]
 
+# --- task-0-only LoRA/Full-FT x Gaussian/correlated-noise comparison -----------------
+# 100 demos of task 0 (episode_index 0..99, since task 0 occupies [0, 200)), fetched from
+# HuggingFace like every other B1K config here (auto-downloads just the needed episodes into
+# $HF_LEROBOT_HOME on first use) -- not through the wave/family pipeline. 90/10 train/val split,
+# held out up front (same rationale as frozen_val_split.json: never trained on).
+B1K_TASK0_TRAIN_EPISODES = list(range(90))
+B1K_TASK0_VAL_EPISODES = list(range(90, 100))
+
 @dataclasses.dataclass(frozen=True)
 class LeRobotB1KDataConfig(DataConfigFactory):
 
@@ -608,6 +622,17 @@ class TrainConfig:
     # Optionally, repo_id for validation set (if different from train)
     val_repo_id: str | None = None
     val_episodes_index: List[int] | None = None
+
+    # If set, path to a .npy file holding a Cholesky factor L (shape
+    # (action_horizon * noise_real_action_dim,) ** 2) of a shrinkage-regularized empirical action
+    # covariance matrix. When set, flow-matching training noise for the first
+    # `noise_real_action_dim` action channels is sampled as L @ z (z ~ N(0, I)) instead of iid
+    # N(0, I), reproducing correlated-noise flow matching. Padding channels beyond
+    # `noise_real_action_dim` (added by PadStatesAndActions) always stay iid N(0, I), since they
+    # carry no real signal. None (the default) preserves the original iid-Gaussian behavior.
+    noise_cholesky_path: str | None = None
+    # Number of leading action channels the Cholesky factor covers; the rest are padding.
+    noise_real_action_dim: int | None = None
 
     @property
     def assets_dirs(self) -> pathlib.Path:
@@ -1333,7 +1358,100 @@ def _make_family_configs() -> list[TrainConfig]:
     return configs
 
 
-_CONFIGS = [*_CONFIGS, *_make_wave_configs(), *_make_family_configs()]
+def _make_task0_noise_configs() -> list[TrainConfig]:
+    """4-way comparison on the 100-demo task-0 subset: {LoRA, Full-FT} x {Gaussian, correlated} noise.
+
+    All four share the same data (90 train / 10 val episodes of task 0, fetched from HuggingFace
+    like every other B1K config here) and the same pi0.5 base checkpoint, so the only things that
+    differ are which weights are trainable and how flow-matching training noise is sampled. The
+    "correlated" variants read a precomputed Cholesky factor of a
+    shrinkage-regularized empirical action covariance (see scripts/compute_action_covariance.py);
+    run that (after compute_norm_stats.py on one of the *_gauss configs) before launching the
+    *_corr configs, or training will fail fast on the missing .npy file.
+    """
+    # Shared assets dir (not the per-config-name default) so norm stats -- identical across all
+    # four variants, since they train on the same data -- only need computing once. Points at
+    # pi05_b1k_task0_lora_gauss's own (real, per-name) assets path: `compute_norm_stats.py`
+    # always saves to `config.assets_dirs / repo_id` regardless of any AssetsConfig override
+    # (only *reads* respect the override), so the override must name that exact path -- same
+    # trick as `_B1K_ARM0_ASSETS` below, which points every wave at arm0's real assets dir.
+    # Run once: `uv run scripts/compute_norm_stats.py --config-name pi05_b1k_task0_lora_gauss`.
+    task0_assets = AssetsConfig(
+        assets_dir="/mnt/train-data-1-hdd/b1k-challenge/openpi_experiments/assets/pi05_b1k_task0_lora_gauss",
+        asset_id=B1K_REPO_ID,
+    )
+    data = LeRobotB1KDataConfig(
+        repo_id=B1K_REPO_ID,
+        assets=task0_assets,
+        base_config=DataConfig(
+            prompt_from_task=True,
+            episodes_index=B1K_TASK0_TRAIN_EPISODES,
+        ),
+    )
+    lora_model = pi0_config.Pi0Config(pi05=True, action_horizon=32, paligemma_variant="gemma_2b_lora")
+    full_model = pi0_config.Pi0Config(pi05=True, action_horizon=32)
+    noise_cholesky_path = (
+        "/mnt/train-data-1-hdd/b1k-challenge/openpi_experiments/assets/pi05_b1k_task0/action_cholesky.npy"
+    )
+    common = dict(
+        project_name="B1K",
+        exp_name="task0_100demo",
+        data=data,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=2_000,
+        lr_schedule=_optimizer.CosineDecaySchedule(decay_steps=2_000),
+        ema_decay=None,
+        log_interval=20,
+        save_interval=2_000,
+        keep_period=2_000,
+        val_log_interval=200,
+        val_repo_id=B1K_REPO_ID,
+        val_episodes_index=B1K_TASK0_VAL_EPISODES,
+        val_num_batches=5,
+        assets_base_dir="/mnt/train-data-1-hdd/b1k-challenge/openpi_experiments/assets",
+        checkpoint_base_dir="/mnt/train-data-1-hdd/b1k-challenge/openpi_experiments/checkpoints",
+        num_workers=8,
+        noise_real_action_dim=23,
+    )
+    return [
+        TrainConfig(
+            name="pi05_b1k_task0_lora_gauss",
+            model=lora_model,
+            freeze_filter=lora_model.get_freeze_filter(),
+            batch_size=16,
+            fsdp_devices=1,
+            **common,
+        ),
+        TrainConfig(
+            name="pi05_b1k_task0_lora_corr",
+            model=lora_model,
+            freeze_filter=lora_model.get_freeze_filter(),
+            batch_size=16,
+            fsdp_devices=1,
+            noise_cholesky_path=noise_cholesky_path,
+            **common,
+        ),
+        TrainConfig(
+            name="pi05_b1k_task0_full_gauss",
+            model=full_model,
+            freeze_filter=full_model.get_freeze_filter(),
+            batch_size=16,
+            fsdp_devices=2,
+            **common,
+        ),
+        TrainConfig(
+            name="pi05_b1k_task0_full_corr",
+            model=full_model,
+            freeze_filter=full_model.get_freeze_filter(),
+            batch_size=16,
+            fsdp_devices=2,
+            noise_cholesky_path=noise_cholesky_path,
+            **common,
+        ),
+    ]
+
+
+_CONFIGS = [*_CONFIGS, *_make_wave_configs(), *_make_family_configs(), *_make_task0_noise_configs()]
 
 _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
 

@@ -17,6 +17,7 @@ from openpi import transforms as _transforms
 from openpi.models import model as _model
 from openpi.shared import array_typing as at
 from openpi.shared import nnx_utils
+from openpi.training import noise as _noise
 
 BasePolicy: TypeAlias = _base_policy.BasePolicy
 
@@ -33,6 +34,8 @@ class Policy(BasePolicy):
         metadata: dict[str, Any] | None = None,
         pytorch_device: str = "cpu",
         is_pytorch: bool = False,
+        noise_cholesky: at.Array | None = None,
+        noise_real_action_dim: int | None = None,
     ):
         """Initialize the Policy.
 
@@ -46,6 +49,15 @@ class Policy(BasePolicy):
             pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda:0").
                           Only relevant when is_pytorch=True.
             is_pytorch: Whether the model is a PyTorch model. If False, assumes JAX model.
+            noise_cholesky: For a model trained with correlated flow-matching noise (see
+                openpi.training.noise), the same Cholesky factor used at training time. The
+                learned vector field transports *that* noise distribution to the data
+                distribution, so sampling from a different one at inference (e.g. plain iid
+                Gaussian) would systematically bias the rollout -- every `infer()` call draws a
+                fresh sample from it unless the caller passes an explicit `noise=` override.
+                None (the default) preserves the original iid-Gaussian sampling.
+            noise_real_action_dim: Number of leading action channels `noise_cholesky` covers;
+                required if `noise_cholesky` is set.
         """
         self._model = model
         self._input_transform = _transforms.compose(transforms)
@@ -54,6 +66,10 @@ class Policy(BasePolicy):
         self._metadata = metadata or {}
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
+        self._noise_cholesky = noise_cholesky
+        self._noise_real_action_dim = noise_real_action_dim
+        if noise_cholesky is not None and is_pytorch:
+            raise NotImplementedError("Correlated-noise inference is not implemented for PyTorch models.")
 
         if self._is_pytorch_model:
             self._model = self._model.to(pytorch_device)
@@ -73,6 +89,14 @@ class Policy(BasePolicy):
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
             self._rng, sample_rng_or_pytorch_device = jax.random.split(self._rng)
+            if noise is None and self._noise_cholesky is not None:
+                sample_rng_or_pytorch_device, noise_rng = jax.random.split(sample_rng_or_pytorch_device)
+                noise = _noise.sample_correlated_noise(
+                    noise_rng,
+                    (1, self._model.action_horizon, self._model.action_dim),
+                    self._noise_cholesky,
+                    self._noise_real_action_dim,
+                )
         else:
             # Convert inputs to PyTorch tensors and move to correct device
             inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs)

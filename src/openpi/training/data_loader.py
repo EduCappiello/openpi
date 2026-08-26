@@ -11,7 +11,6 @@ from typing import Literal, Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
-import datasets
 import lerobot.datasets.lerobot_dataset as lerobot_dataset
 import lerobot.datasets.utils as lerobot_utils
 import numpy as np
@@ -191,7 +190,19 @@ def _cached_hf_dataset():
     Keyed by dataset root, the exact episode list and the feature set, so a different
     subset (e.g. a taxonomy-family split) simply gets its own cache entry rather than
     silently reusing the wrong rows.
+
+    This targets the older LeRobotDataset internals (a `load_hf_dataset` method plus a
+    `hf_dataset` attribute holding a `datasets.Dataset`). Newer LeRobot versions restructured
+    dataset loading around a `DatasetReader` and no longer expose either, so this optimization
+    is a no-op there -- loading is correctness-critical, this caching is a startup-time nicety
+    on top of it, and skipping it is safe (dataset loading is just not sped up).
     """
+    if not hasattr(lerobot_dataset.LeRobotDataset, "load_hf_dataset"):
+        yield
+        return
+
+    import datasets  # only needed by this old-API caching path (see docstring)
+
     original_load = lerobot_dataset.LeRobotDataset.load_hf_dataset
 
     def patched_load(self):
@@ -279,9 +290,10 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     with _without_unused_video_keys(), _cached_hf_dataset():
-        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.local_root)
         dataset = lerobot_dataset.LeRobotDataset(
             data_config.repo_id,
+            root=data_config.local_root,
             delta_timestamps={
                 key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
             },

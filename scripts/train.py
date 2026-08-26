@@ -22,6 +22,7 @@ import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.checkpoints as _checkpoints
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
+import openpi.training.noise as _noise
 import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
@@ -136,6 +137,7 @@ def init_train_state(
 @at.typecheck
 def train_step(
     config: _config.TrainConfig,
+    noise_chol: at.Array | None,
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
     batch: tuple[_model.Observation, _model.Actions],
@@ -147,7 +149,13 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        chunked_loss = model.compute_loss(rng, observation, actions, train=True)
+        noise = None
+        if noise_chol is not None:
+            noise_rng, rng = jax.random.split(rng)
+            noise = _noise.sample_correlated_noise(
+                noise_rng, actions.shape, noise_chol, config.noise_real_action_dim
+            )
+        chunked_loss = model.compute_loss(rng, observation, actions, train=True, noise=noise)
         return jnp.mean(chunked_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
@@ -189,6 +197,43 @@ def train_step(
         "param_norm": optax.global_norm(kernel_params),
     }
     return new_state, info
+
+
+@at.typecheck
+def val_step(
+    state: training_utils.TrainState,
+    rng: at.KeyArrayLike,
+    batch: tuple[_model.Observation, _model.Actions],
+) -> at.Array:
+    """Validation loss, always under standard iid noise (even for correlated-noise training
+    configs) so that val_loss stays a common, comparable yardstick across noise variants."""
+    model = nnx.merge(state.model_def, state.params)
+    model.eval()
+    observation, actions = batch
+    chunked_loss = model.compute_loss(rng, observation, actions, train=False)
+    return jnp.mean(chunked_loss)
+
+
+def _make_val_data_loader(config: _config.TrainConfig, *, sharding_: jax.sharding.Sharding):
+    """Builds the held-out validation loader from config.val_repo_id/val_episodes_index, if set.
+
+    These fields exist on TrainConfig but scripts/train.py did not previously read them.
+    """
+    if config.val_repo_id is None:
+        return None
+    val_data_config = dataclasses.replace(config.data, repo_id=config.val_repo_id)
+    if val_data_config.base_config is not None:
+        val_data_config = dataclasses.replace(
+            val_data_config,
+            base_config=dataclasses.replace(val_data_config.base_config, episodes_index=config.val_episodes_index),
+        )
+    val_config = dataclasses.replace(config, data=val_data_config)
+    return _data_loader.create_data_loader(
+        val_config,
+        sharding=sharding_,
+        shuffle=False,
+        num_batches=config.val_num_batches,
+    )
 
 
 def main(config: _config.TrainConfig):
@@ -240,12 +285,30 @@ def main(config: _config.TrainConfig):
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
 
+    noise_chol = None
+    if config.noise_cholesky_path is not None:
+        noise_chol = _noise.load_cholesky(config.noise_cholesky_path)
+        logging.info(
+            f"Loaded correlated-noise Cholesky factor from {config.noise_cholesky_path}, "
+            f"shape={noise_chol.shape}"
+        )
+
     ptrain_step = jax.jit(
-        functools.partial(train_step, config),
+        functools.partial(train_step, config, noise_chol),
         in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
+
+    val_data_loader = _make_val_data_loader(config, sharding_=data_sharding)
+    pval_step = jax.jit(
+        val_step,
+        in_shardings=(train_state_sharding, replicated_sharding, data_sharding),
+        out_shardings=replicated_sharding,
+    )
+    if val_data_loader is not None:
+        logging.info(f"Validation enabled: {len(config.val_episodes_index or [])} episodes, "
+                     f"every {config.val_log_interval} steps, {config.val_num_batches} batches/eval")
 
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
@@ -267,6 +330,16 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+        if val_data_loader is not None and step % config.val_log_interval == 0:
+            val_rng = jax.random.fold_in(rng, step)
+            val_losses = []
+            for val_batch in val_data_loader:
+                val_rng, step_rng = jax.random.split(val_rng)
+                with sharding.set_mesh(mesh):
+                    val_losses.append(pval_step(train_state, step_rng, val_batch))
+            val_loss = float(jax.device_get(jnp.mean(jnp.stack(val_losses))))
+            pbar.write(f"Step {step}: val_loss={val_loss:.4f}")
+            wandb.log({"val_loss": val_loss}, step=step)
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
