@@ -111,7 +111,7 @@
       "demo_hi": 100,
       "num_train_steps": 15000,
       "warm_start": "wave8",
-      "status": "COMPLETE (step 14999)"
+      "status": "QUEUED"
     },
     {
       "name": "F4_heavy_grasp",
@@ -129,7 +129,7 @@
       "demo_hi": 100,
       "num_train_steps": 15000,
       "warm_start": "backbone",
-      "status": "COMPLETE (step 14999)"
+      "status": "QUEUED"
     },
     {
       "name": "F3_surface_contact",
@@ -152,7 +152,7 @@
       "demo_hi": 100,
       "num_train_steps": 15000,
       "warm_start": "backbone",
-      "status": "COMPLETE (step 14999)"
+      "status": "QUEUED"
     },
     {
       "name": "F2_actuation_transfer",
@@ -187,7 +187,7 @@
       "demo_hi": 100,
       "num_train_steps": 15000,
       "warm_start": "backbone",
-      "status": "COMPLETE (step 14999)"
+      "status": "QUEUED"
     },
     {
       "name": "F1_constrained_insertion",
@@ -223,7 +223,7 @@
       "demo_hi": 100,
       "num_train_steps": 15000,
       "warm_start": "backbone",
-      "status": "COMPLETE (step 14999)"
+      "status": "QUEUED"
     }
   ],
   "created": "2026-08-19T00:00:00+00:00",

@@ -10,6 +10,7 @@ import openpi.policies.policy as _policy
 import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
+from openpi.training import noise as _noise
 import openpi.transforms as transforms
 
 
@@ -72,6 +73,12 @@ def create_trained_policy(
         except ImportError:
             pytorch_device = "cpu"
 
+    noise_cholesky = None
+    if train_config.noise_cholesky_path is not None:
+        # Same Cholesky factor the checkpoint was trained with (see openpi.training.noise) --
+        # sampling from a different noise distribution at inference would bias the rollout.
+        noise_cholesky = _noise.load_cholesky(train_config.noise_cholesky_path)
+
     return _policy.Policy(
         model,
         transforms=[
@@ -91,4 +98,6 @@ def create_trained_policy(
         metadata=train_config.policy_metadata,
         is_pytorch=is_pytorch,
         pytorch_device=pytorch_device if is_pytorch else None,
+        noise_cholesky=noise_cholesky,
+        noise_real_action_dim=train_config.noise_real_action_dim,
     )
