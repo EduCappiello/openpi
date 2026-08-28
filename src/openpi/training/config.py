@@ -802,14 +802,14 @@ _CONFIGS = [
         # checkpoints (~140 GB) over a 50k-step run, which does not fit alongside the
         # staged dataset. 10k keeps 5 milestones (~70 GB) plus the rolling recent one.
         keep_period=10_000,
-        # FULL fine-tuning: batch 64 across 4x H100 80 GB requires sharding the ~2.4B
-        # model + fp32 optimizer states across all 4 GPUs (fsdp_devices=4, not 1).
-        fsdp_devices=4,
-        batch_size=64,
-        # Training is dataloader-bound: batch 64 x 3 cameras x ~0.14 s pyav decode. The box
-        # has a 40-CPU cgroup quota (nproc reports 192 and lies), so 32 workers leaves ~8
+        # FULL fine-tuning: 2-GPU pod -- shard the ~2.4B model + fp32 optimizer states
+        # across both H100s (fsdp_devices=2) at batch 32.
+        fsdp_devices=2,
+        batch_size=32,
+        # Training is dataloader-bound: batch 32 x 3 cameras x ~0.14 s pyav decode. The box
+        # has a 20-CPU cgroup quota (nproc reports 192 and lies), so 8 workers leaves ~12
         # CPUs for the main process and JAX host work.
-        num_workers=32,
+        num_workers=8,
     ),
 
     #
@@ -1259,16 +1259,17 @@ def _make_wave_configs() -> list[TrainConfig]:
                 assets_base_dir="./outputs/assets",
                 checkpoint_base_dir="./outputs/checkpoints",
                 # FULL fine-tuning holds the entire ~2.4B model + fp32 Adam optimizer on
-                # each GPU. Shard across all 4 H100s (fsdp_devices=4) so per-GPU memory
-                # stays well under 80 GB at batch 64; fsdp_devices=1 would be ~70+ GB/GPU.
-                fsdp_devices=4,
+                # each GPU. 2-GPU pod: shard across both H100s (fsdp_devices=2) at batch
+                # 32 to stay well under 80 GB/GPU while a concurrent workload holds
+                # ~28 GB/GPU.
+                fsdp_devices=2,
                 # Disk is tight. keep_period == num_train_steps pins only the final step
                 # as a milestone; max_to_keep=1 evicts the rolling latest once superseded,
                 # so a wave costs ~1 checkpoint (~13 GB) in steady state, not N.
                 keep_period=steps,
                 save_interval=2500,
-                batch_size=64,
-                num_workers=32,
+                batch_size=32,
+                num_workers=8,
             )
         )
         prev_params = f"./outputs/checkpoints/{name}/{w['name']}/{steps - 1}/params"
@@ -1345,14 +1346,14 @@ def _make_family_configs() -> list[TrainConfig]:
                 val_episodes_index=val_episodes,
                 assets_base_dir="./outputs/assets",
                 checkpoint_base_dir="./outputs/checkpoints",
-                # FULL fine-tuning: shard the ~2.4B model + fp32 Adam states across all 4
-                # H100s so batch 64 fits well under 80 GB/GPU (see _b1k_wave_model).
-                fsdp_devices=4,
+                # FULL fine-tuning: 2-GPU pod -- shard the ~2.4B model + fp32 Adam states
+                # across both H100s at batch 32 (see _b1k_wave_model).
+                fsdp_devices=2,
                 # Disk-tight: pin only the final step as a milestone, rolling latest evicted.
                 keep_period=steps,
                 save_interval=2500,
-                batch_size=64,
-                num_workers=32,
+                batch_size=32,
+                num_workers=8,
             )
         )
     return configs
@@ -1449,6 +1450,9 @@ def _make_task0_noise_configs() -> list[TrainConfig]:
             **common,
         ),
     ]
+
+
+_CONFIGS = [*_CONFIGS, *_make_wave_configs(), *_make_family_configs(), *_make_task0_noise_configs()]
 
 
 _CONFIGS = [*_CONFIGS, *_make_wave_configs(), *_make_family_configs(), *_make_task0_noise_configs()]

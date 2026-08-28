@@ -4,6 +4,19 @@ Foolproof, step-by-step guide to launch, monitor, troubleshoot, and resume the
 BEHAVIOR-1K **backbone_foundation** fine-tune. This is the operational playbook;
 `b1k_families/README.md` is the design reference.
 
+> ## 🔄 POD MOVED (2026-08-27): read before any command below
+>
+> This runbook was written for the old 4×H100 pod. On this 2×H100, 20-core pod:
+> - openpi root is **`/tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi`** (replace every
+>   `/root/BEHAVIOR-1K/...` below);
+> - `fsdp_devices=2`, `batch_size=32`, `num_workers=8` (were 4/64/32);
+> - VRAM co-tenant is **ollama, ~28 GB/GPU, kept running** — expect **~52 GB free/GPU**, not
+>   "~55–60 GB after killing llama.cpp". `preflight.py` floor is now **0.59** (live FRAC
+>   ≈ 0.593); disk is checked on **`/tmp/hf-cache`** (14 TB), not `/`;
+> - disk is no longer tight: the demos[90,100) window (111 GB) is **already staged** and the
+>   wave8 warm-start params (11 GB) are **already fetched** to the conventional path.
+> See `b1k_waves/AGENT_PRIMER.md` for the full old-vs-new table.
+
 > ## ✅ CURRENT STATE (2026-08-21): CAMPAIGN COMPLETE — backbone + F1..F4 all trained & uploaded
 >
 > **Phase 1 + Phase 2 are DONE.** All five checkpoints (`backbone_foundation` + `F1..F4`, each
@@ -39,15 +52,16 @@ BEHAVIOR-1K **backbone_foundation** fine-tune. This is the operational playbook;
 >   The local wave7/wave8 checkpoints were deleted for disk; the wave8 warm-start is
 >   re-downloaded from HF (step 1). Do **not** re-train waves.
 > - **Model config is FULL FT**: `_b1k_wave_model()` = `Pi0Config(pi05=True, action_horizon=32)`
->   → `gemma_2b` (no LoRA), `fsdp_devices=4`. See `b1k_waves/WAVE_TRAINING.md` "Model config (full FT)".
+>   → `gemma_2b` (no LoRA), `fsdp_devices=2` on this 2-GPU pod (was 4). See
+>   `b1k_waves/WAVE_TRAINING.md` "Model config (full FT)".
 > - Training data = **frozen split ∩ all tasks ∩ demos[90,100)** (Option B). The frozen split
 >   (`b1k_waves/frozen_val_split.json`) is intersected per family in `config.py`.
-> - Free the GPU (stop any large concurrent workload) before launching.
+> - Free the GPU (stop standalone `/root/llama.cpp/llama-server`) before launching.
 
 **Every command is copy-paste safe.** Run each from the openpi repo root:
 
 ```bash
-cd /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi
+cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi
 ```
 
 ---
@@ -92,45 +106,33 @@ ledger; §6B-2 appends F1..F4 before the Phase 2 launch.
 The orchestrator's `preflight.py` blocks launch if GPUs are over-subscribed or the disk is
 too full. Check everything **before** starting training.
 
-### 2a. Find VRAM-hogging processes — three different things
+### 2a. Find VRAM-hogging processes — one thing (on this pod)
 
-This pod may run concurrent GPU workloads in addition to the trainer. Identify them by
-process name and VRAM footprint before deciding what to stop:
+This pod runs **ollama** plus the trainer. (The old pod also had a standalone
+`/root/llama.cpp/llama-server` hog at 40+ GB/GPU — it does not exist here.)
 
-| Thing | Typical VRAM | Must you stop it? |
-|---|---|---|
-| Small concurrent workload | ~10–15 GB/GPU | **NO — keep it running** |
-| Large concurrent workload | **40+ GB/GPU** | **YES — this is the real hog** to stop |
+| Thing | Binary / process | Parent | Typical VRAM | Must you stop it? |
+|---|---|---|---|---|
+| **Ollama service** | `ollama serve` | init/supervisor | ~0 (daemon) | **NO — keep it running** |
+| **Ollama's inference child** | `/root/lib/ollama/llama-server` | `ollama serve` | **~28 GB/GPU** when a model is loaded | **NO — training is tuned to run alongside it** |
 
 ```bash
 nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader
 nvidia-smi
+ps aux | grep -E 'llama-server|ollama|vllm' | grep -v grep
 ```
 
-### 2b. Stop the VRAM hogs
+### 2b. (Old pod) Stop the VRAM hogs
 
-Only stop a large (40+ GB/GPU) workload that prevents training from fitting. Never stop
-a small footprint the environment needs. Free memory one process at a time:
-
-```bash
-# one at a time, by PID (most surgical):
-kill <pid>                 # SIGTERM, then:
-kill -9 <pid>              # only if it ignores SIGTERM
-```
-
-**Do NOT run a blanket `pkill` that could match a small footprint you must keep.**
-
-Verify memory is actually freed before continuing:
-
-```bash
-nvidia-smi --query-gpu=index,memory.total,memory.used,memory.free,utilization.gpu --format=csv
-```
+**Not applicable on this pod** — ollama is the only co-tenant and it stays up. If the user
+ever frees it, do so by PID (`kill <pid>`), never `pkill -f ollama`.
 
 ### 2c. Confirm free VRAM meets the requirement
 
 `preflight.py` computes `FRAC = (free_MiB - safety) / total` and aborts if below its floor.
-Default floor is `0.72`; **this pod's floor is tuned to `0.60`** (in `preflight.py`, or
-override with `B1K_MEM_FRACTION_FLOOR`). Verify **at least ~55–60 GB free per GPU**:
+**This pod's floor is `0.59`** (in `preflight.py`, or override with `B1K_MEM_FRACTION_FLOOR`);
+with ollama resident the live FRAC is ≈ 0.593 and passes. Verify **at least ~47 GB free per
+GPU** (ollama ~28 GB + prealloc ~49 GB + safety):
 
 ```bash
 nvidia-smi --query-gpu=index,memory.total,memory.used,memory.free --format=csv,noheader
@@ -138,14 +140,17 @@ nvidia-smi --query-gpu=index,memory.total,memory.used,memory.free --format=csv,n
 
 ### 2d. Confirm free disk
 
-Preflight aborts if free disk `< 40 GB` (env `B1K_MIN_DISK_GB`):
+Preflight aborts if free disk `< 40 GB` (env `B1K_MIN_DISK_GB`). **On this pod the check
+runs on the data volume `/tmp/hf-cache` (14 TB), not `/`** (a 66 GB PVC holding only the
+backup repo + small caches):
 
 ```bash
-df -h / | tail -1
+df -h /tmp | tail -1
 ```
 
-After the 2026-08-19 cleanup ~251 GB is free. The run needs staged demos for demos[90,100)
-(~5–6 GB) + the final checkpoint (~29 GB) + the downloaded wave8 params (~7 GB).
+Current pod state (2026-08-27): the demos[90,100) window is **already staged (111 GB)** and
+the wave8 warm-start params are **already fetched (11 GB)**. A fresh 5-family re-run needs
+~29 GB per final checkpoint.
 
 ### 2e. HuggingFace token (for uploads + the wave8 download)
 
@@ -241,15 +246,16 @@ Confirm the config resolves and monitoring shows exactly one family, QUEUED:
 
 ### 3c. Launch the pipeline (in tmux)
 
-> Free the GPU (stop any large concurrent workload) first. The wave gate
-> (`next_wave == DONE`) is already satisfied.
+> Old pod: free the GPU first (standalone llama.cpp). **This pod: no action needed — ollama
+> stays running and training is tuned for it.** The wave gate (`next_wave == DONE`) is
+> already satisfied.
 
 Start the orchestrator in a detached tmux session so it survives your terminal closing.
-Prefer the long-lived `behavior` session via `tmux send-keys`; otherwise:
+Prefer the long-lived `behavior` session via `tmux send-keys`; otherwise (this pod's path):
 
 ```bash
 tmux new-session -d -s behavior_family \
-  'cd /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi && bash b1k_families/run_family_experts.sh 2>&1 | tee ~/family_train_pipeline.log'
+  'cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi && bash b1k_families/run_family_experts.sh 2>&1 | tee ~/family_train_pipeline.log'
 ```
 
 Attach / detach anytime:
@@ -266,7 +272,9 @@ tmux ls                               # confirm the session exists
 
 1. `next_family_info.py` → decides the next family (here: `backbone_foundation`) or `DONE`.
 2. `preflight.py` → VRAM/disk/lerobot/cwd/warm-start checks; computes the XLA memory fraction.
-3. `ensure_lerobot.py` → pins lerobot `0.4.4` (v3.0 dataset layout support).
+3. `ensure_lerobot.py` → enforces the lerobot version pinned in `uv.lock` (currently the
+   wensi-ai/lerobot `release/b1k` fork, 0.5.2 — v3.0 dataset layout support); on mismatch it
+   runs `uv sync --frozen`.
 4. `stage_family.py --tasks 0..99 --lo 90 --hi 100` → downloads demos[90,100) media for all
    100 tasks (idempotent; files already on disk are skipped).
 5. `scripts/train.py pi05_b1k_backbone_foundation --resume --no-wandb-enabled` → trains to
@@ -324,11 +332,12 @@ tail -f ~/family_train_pipeline.log            # everything the tmux process pri
 
 | Signal | Healthy state |
 |---|---|
-| `nvidia-smi` | ~100% GPU utilization, ~60 GB VRAM used per GPU |
-| Orchestrator log | `lerobot OK (0.4.4)`, `FRACTION=<float>`, `warm-start: ... -> OK` |
-| Training log | `[I] Progress on: 123it/15.0kit rate:1.3 it/s remaining:...` |
+| `nvidia-smi` | ~100% GPU utilization on **both** GPUs, ~77 GB VRAM used per GPU (ollama ~28 + trainer ~49) |
+| Orchestrator log | `lerobot OK (0.5.2)`, `FRACTION=<float>` (≈0.593 on this pod), `warm-start: ... -> OK` |
+| Training log | `[I] Progress on: 123it/15.0kit rate:... remaining:...` |
 
-15000 steps → the total reads `15.0kit`. At ~1.3 it/s on 4×H100, one run ≈ **~3.2 h**.
+15000 steps → the total reads `15.0kit`. At ~1.3 it/s on the old 4×H100 box, one run ≈
+~3.2 h; **budget ~2× that on this 2-GPU pod** (batch 32, lower per-step rate — estimate).
 
 ---
 
@@ -355,9 +364,9 @@ it retries (attempt N/3) or you relaunch tmux, both safe.
 
 | FATAL message | Meaning | Fix |
 |---|---|---|
-| `computed FRAC X < floor 0.600` | Not enough free VRAM | Free some VRAM (§2b), re-check (§2c), re-run |
-| `disk: X GB free (require 40 GB)` | Disk too full | Free ≥ 40 GB, re-run |
-| `lerobot wrong/missing (need 0.4.4)` | Wrong lerobot | Run `b1k_waves/ensure_lerobot.py`, re-run |
+| `computed FRAC X < floor 0.590` | Not enough free VRAM | Ask the user to free VRAM (ollama is the co-tenant), re-check (§2c), re-run |
+| `disk: X GB free at /tmp/hf-cache (require 40 GB)` | Disk too full | Free ≥ 40 GB on the data volume, re-run (rare on 14 TB) |
+| `lerobot wrong/missing (need 0.5.2)` | Wrong lerobot | Run `b1k_waves/ensure_lerobot.py`, re-run |
 | `warm-start: <path> -> MISSING` | Wave8 params not downloaded | Do §3a, re-run |
 
 After fixing, **just re-run the orchestrator** — it resumes, it does not restart.
@@ -422,9 +431,10 @@ tmux launch runs all four back-to-back (`run_family_experts.sh` loops until DONE
 
 ### 6B-1. Free the GPU
 
-Same as §2a/§2b: stop any large concurrent workload if running, then
-confirm ~55–60 GB free per GPU (§2c) and ≥ 40 GB disk (§2d). Disk is tight now (~100 GB free):
-see the cleanup guidance in §6B-5 before starting.
+**This pod: nothing to free** — ollama stays running and the pipeline is tuned for it (floor
+0.59). Just confirm ≥ ~47 GB free per GPU (§2c) and ≥ 40 GB on `/tmp/hf-cache` (§2d). Disk is
+**not** tight on this pod (14 TB data volume); the §6B-5 cleanup guidance is optional, not
+required.
 
 ### 6B-2. Wire the ledger (copy-paste; run from openpi repo root)
 
@@ -469,12 +479,13 @@ edit did not take — do NOT launch (an expert would silently fresh-init instead
 
 ```bash
 tmux new-session -d -s behavior_family \
-  'cd /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi && bash b1k_families/run_family_experts.sh 2>&1 | tee ~/family_train_pipeline.log'
+  'cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi && bash b1k_families/run_family_experts.sh 2>&1 | tee ~/family_train_pipeline.log'
 ```
 
-The orchestrator loops `F4 → F3 → F2 → F1` (each ~15,000 steps ≈ 3.3 h; total ≈ 2 days), then
-uploads each on completion and exits DONE. Monitoring is identical to §4: `family_status.py`,
-`next_family_info.py`, `tail -f b1k_families/train_F*.log` (fresh log per expert).
+The orchestrator loops `F4 → F3 → F2 → F1` (each ~15,000 steps ≈ 3.3 h on the old 4×H100 pod;
+**budget ~2× on this 2-GPU pod**), then uploads each on completion and exits DONE.
+Monitoring is identical to §4: `family_status.py`, `next_family_info.py`,
+`tail -f b1k_families/train_F*.log` (fresh log per expert).
 
 ### 6B-4. Per-expert upload & disk management
 
@@ -485,9 +496,9 @@ After EACH expert's `upload_family.py` succeeds, verify the folder on HF
 .venv/bin/python b1k_families/cleanup_family.py F4_heavy_grasp --yes   # only after upload verified
 ```
 
-Disk is the binding constraint (~100 GB free; 4 experts ≈ +116 GB if never cleaned). If it gets
-tighter, pause the orchestrator (kill tmux session), clean uploaded checkpoints, resume — the
-pipeline is idempotent (§5a).
+On the old pod disk was the binding constraint (~100 GB free; 4 experts ≈ +116 GB if never
+cleaned). **On this 14 TB pod it is not** — cleaning after upload is optional (still a good
+habit); the pipeline stays idempotent (§5a) either way.
 
 **Never delete the backbone checkpoint itself until ALL four experts are COMPLETE on disk AND
 uploaded:** `cleanup_family.py backbone_foundation --yes` only at the very end.
@@ -553,7 +564,7 @@ full-FT run). If the folder is missing, re-run the upload.
 |---|---|
 | Download wave8 warm-start | see §3a |
 | Populate ledger (backbone_foundation) | see §3b |
-| Launch pipeline (detached) | `tmux new-session -d -s behavior_family 'cd /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi && bash b1k_families/run_family_experts.sh 2>&1 \| tee ~/family_train_pipeline.log'` |
+| Launch pipeline (detached) | `tmux new-session -d -s behavior_family 'cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi && bash b1k_families/run_family_experts.sh 2>&1 \| tee ~/family_train_pipeline.log'` |
 | Attach / detach tmux | `tmux attach -t behavior_family` / `Ctrl-b d` |
 | LEDGER status | `.venv/bin/python b1k_families/family_status.py` |
 | Next to run | `.venv/bin/python b1k_families/next_family_info.py` |
@@ -563,7 +574,7 @@ full-FT run). If the folder is missing, re-run the upload.
 | Preflight dry-run | `.venv/bin/python b1k_families/preflight.py --warm-start <wave8 params_dir>` |
 | Show GPU/VRAM | `nvidia-smi --query-gpu=index,memory.total,memory.free,utilization.gpu --format=csv` |
 | Show GPU procs | `nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader` |
-| Stop VRAM hog | `kill <pid>` · `pkill -f <large_workload>` |
+| Stop VRAM hog | (this pod) none — ollama stays running; old pod: `kill <pid>` (never `ollama`) |
 | Set HF token | `export HF_TOKEN=hf_your_token` |
 | Upload backbone | `.venv/bin/python b1k_families/upload_family.py backbone_foundation` |
 | Verify gated-upload | see §7 snippet (prints `gated` + folders) |

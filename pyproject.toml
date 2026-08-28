@@ -11,6 +11,11 @@ dependencies = [
     "einops>=0.8.0",
     "equinox>=0.11.8",
     "flatbuffers>=24.3.25",
+    # Real runtime dep of the lerobot data path: the wensi-ai fork's
+    # lerobot.utils.utils imports accelerate at module load, but openpi only
+    # requests the [dataset] extra (accelerate lives in the fork's training/
+    # smolvla extras). Declared directly so `uv sync` is self-sufficient.
+    "accelerate>=1.10.0,<2.0.0",
     "flax==0.10.2",
     "fsspec[gcs]>=2024.6.0",
     # "gym-aloha>=0.1.1",

@@ -2,56 +2,105 @@
 
 **Read this BEFORE `WAVE_TRAINING.md`. It tells you the current state of affairs and where to look.**
 
-## What's happening right now (2026-08-15)
+## What's happening right now (2026-08-28)
 
-**This is the FULL fine-tuning campaign** (`gemma_2b`, full FT, `action_horizon=32`,
-`fsdp_devices=4`). It is **mid-way through the wave chain**, not deferred.
+> **2026-08-28 — merged `train` (allenwang's correlated-noise work) + this pod's 2-GPU state.**
+> `git pull`/merge brought in the `EduCappiello/openpi` `train` tip `00f75a7` ("feat: add noise
+> test") and re-applied the local 2-GPU config values. What is new in this tree:
+>
+> - **Correlated flow-matching noise** — `src/openpi/training/noise.py` (new module:
+>   `load_cholesky` + `sample_correlated_noise`). `train.py` threads a precomputed Cholesky
+>   factor of a shrinkage-regularized empirical action covariance through `train_step`, and
+>   `Pi0.compute_loss` now accepts an optional `noise=` override (default behavior unchanged:
+>   iid N(0,I)). Inference matches via `Policy(noise_cholesky=...)` / `policy_config`.
+> - **4 new task-0 comparison configs** — `pi05_b1k_task0_{lora,full}_{gauss,corr}` in
+>   `config.py` (`_make_task0_noise_configs`): {LoRA, Full-FT} × {Gaussian, correlated} on a
+>   100-demo task-0 subset (90 train / 10 val). `common` has `noise_real_action_dim=23`,
+>   `val_log_interval=200`, `val_num_batches=5`.
+> - **`scripts/compute_action_covariance.py`** (new) — builds the `action_cholesky.npy` the
+>   `*_corr` configs need (run it AFTER `compute_norm_stats.py --config-name
+>   pi05_b1k_task0_lora_gauss`). **`scripts/serve_b1k_patched.py`** (new) — serves policies
+>   against the 2026-era `omnigibson.eval` layout.
+> - **Validation loop in `train.py`** — `val_step` + `_make_val_data_loader` read
+>   `config.val_repo_id`/`val_episodes_index` (previously unused) and log `val_loss` every
+>   `val_log_interval` steps. Val always uses iid noise, so it's comparable across variants.
+> - **Dependency changes (allenwang's `pyproject.toml`/`uv.lock`)** — lerobot moved from the
+>   HF `huggingface/lerobot` rev to **`wensi-ai/lerobot` branch `release/b1k` (0.5.2)**;
+>   `transformers==5.5.4` (was 4.53.2); `pandas>=2.2.3`; torch built cu128.
+> - **Fix applied in this merge (2026-08-28)** — the fork's `lerobot.utils.utils` imports
+>   `accelerate` at module load, but `accelerate` only lived in the fork's `training`/`smolvla`
+>   extras (openpi requests `lerobot[dataset]`), so a clean `uv sync --frozen` produced a broken
+>   env (`ModuleNotFoundError: No module named 'accelerate'`). `accelerate>=1.10.0,<2.0.0` is
+>   now declared in openpi's `pyproject.toml` + `uv.lock`. Also: `ensure_lerobot.py` no longer
+>   force-downgrades to PyPI `lerobot==0.4.4` (`--no-deps`) — it now enforces the version
+>   pinned in `uv.lock` and runs `uv sync --frozen` on mismatch; `preflight.py` reads the same
+>   pinned version instead of hard-coding `0.4.4`.
+> - **Hardware in configs = this pod (2-GPU).** Wave/family blocks use `fsdp_devices=2`,
+>   `batch_size=32`, `num_workers=8` (the old 4-GPU values are gone with the old pod). The 4
+>   task0 configs use `fsdp_devices=1` (lora) / `2` (full).
+> - **⚠️ task0 asset paths point at `/mnt/train-data-1-hdd/...`** (allenwang's storage) which
+>   does NOT exist on this pod. Before running any `pi05_b1k_task0_*` config, either mount
+>   that path or override `assets_dir`/`assets_base_dir`/`checkpoint_base_dir`/
+>   `noise_cholesky_path` locally. Do not assume they work as-is.
+> - **`family_ledger.json` reset** (allenwang's commit): F1–F4 `COMPLETE (step 14999)` →
+>   `QUEUED` (backbone stays COMPLETE). If a families re-run is intended, this is the starting
+>   state; local checkpoints for F1–F4 were pruned on this pod.
 
-| Wave | Status | Notes |
+**Campaign state: ALL WAVES AND ALL FAMILIES are COMPLETE (step 14999) and uploaded to HF.**
+There is nothing left in the queue — `run_waves.sh` is a no-op and
+`run_family_experts.sh` would retrain from scratch (local checkpoints are pruned; completion is
+disk-only via `REMOTE_COMPLETE_WAVES` / the ledgers).
+
+**This work has moved to a NEW machine** (reinstalled 2026-08-27 from the personal backup).
+The old 4×H100 pod is gone. Key differences from every doc written before 2026-08-27:
+
+| | Old pod (≤ 2026-08-15) | This pod (2026-08-27) |
 |---|---|---|
-| arm0_monolithic (demos 0–30) | base | pretrained warm-start base, auto-fetched from HF |
-| wave1_d30_38 (30–38) | **COMPLETE (step 14999)** | full-FT, uploaded to HF; excluded from re-train |
-| wave2_d38_46 (38–46) | **COMPLETE (step 14999)** | full-FT, uploaded to HF; excluded from re-train |
-| wave3_d46_54 (46–54) | **COMPLETE (step 14999)** | full-FT, uploaded to HF; excluded from re-train |
-| wave4_d54_62 (54–62) | **COMPLETE (step 14999)** | full-FT, uploaded to HF; excluded from re-train |
-| wave5_d62_70 (62–70) | **COMPLETE (step 14999)** | full-FT, uploaded to HF; excluded from re-train |
-| wave6_d70_80 (70–80) | **COMPLETE (step 14999)** | full-FT, uploaded to HF; excluded from re-train |
-| wave7_d80_90 (80–90) | **IN_PROGRESS (step 2500)** | resumes from local checkpoint at step 2500 |
-| wave8_d90_100 (90–100) | **QUEUED** | run after wave7 completes |
-| STAR families (F1..F4) | QUEUED | gated until all waves COMPLETE |
+| GPUs | 4× H100 80 GB | **2× H100 80 GB** (driver 570.86.10, CUDA 12.8) |
+| CPU | 40-core cgroup quota | **20-core** cgroup quota (`/sys/fs/cgroup/cpu.max` = 2000000/100000); RAM ~2 TB |
+| Root disk | ~226 GB, data on `/` | `/` is a **66 GB** gpfs PVC (code/small caches only); **data, venv, checkpoints live on `/tmp` (14 TB LV)** |
+| Working copy | `/root/BEHAVIOR-1K/...` | **`/tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi`** (re-clone + overlay per the backup README) |
+| Full-FT config | `fsdp_devices=4`, batch 64, `num_workers=32` | **`fsdp_devices=2`, batch 32, `num_workers=8`** (edited in `config.py` for this pod) |
+| XLA mem fraction | 0.75 | **0.60** in `run_waves.sh`; families: `preflight.py` computes ~0.593 live, floor lowered to **0.59** |
+| VRAM co-tenant | standalone `/root/llama.cpp/llama-server` ~45 GB/GPU | **ollama** (`/root/lib/ollama/llama-server`) **~28 GB/GPU — kept running on purpose**; ~52 GB free/GPU for training |
+| Thread caps | 40 | **20** (capped in both orchestrators) |
+| HF dataset cache | `~/.cache/b1k_hf_subset` on `/` | **`B1K_HF_DATASET_CACHE=/tmp/hf-dataset-cache`** (set in both orchestrators) |
 
-**wave1–wave6 are done and uploaded to `0Corvid0/pi05-b1k-waves`** (folders
-`wave1_d30_38_38ep` … `wave6_d70_80_80ep`, step 14999). Each uploaded wave's local checkpoint was
-pruned (or manually deleted 2026-08-15 — see below), and all six are registered in
-`REMOTE_COMPLETE_WAVES` in `wave_status.py` — otherwise the disk-only completeness check would
-wrongly mark them QUEUED and the orchestrator would re-train already-consumed demos (re-staging
-~206 GB and re-hitting EDQUOT).
+Path indirections (symlinks, keep them): `~/.cache/huggingface/lerobot → /tmp/hf-cache/lerobot`
+(lets the hardcoded `ROOT` in `stage_wave.py`/`stage_family.py` land on the big volume) and
+`~/.cache/jax → /tmp/jax-cache`. The HF token lives at `~/.cache/huggingface/token`
+(auto-discovered; the demo dataset is public, the arm0 base repo is private).
 
-**wave7 is the active wave.** Its valid local checkpoint is at
-`outputs/checkpoints/pi05_b1k_wave7_d80_90/wave7_d80_90/2500` (~30 GB). It is NOT yet uploaded.
-It warm-starts from wave6's final checkpoint (uploaded; wave6's local copy was deleted in the
-2026-08-15 cleanup).
+**Verified on this pod (2026-08-27):** 100-step smoke run of `pi05_b1k_wave8_d90_100`
+(warm-started from the arm0 base) — both GPUs at ~100% util, loss 0.0425 → 0.0199, checkpoint
+written, then pruned. Re-verify anytime with `bash smoke_test.sh` (repo root). `check_env.py`
+passes. Staged data: wave8 demo window (1,000 eps) = **111 GB** on `/tmp`.
+
+**Re-verified post-merge (2026-08-28):** after pulling allenwang's `train` (lerobot 0.5.2
+fork, transformers 5.5.4, `accelerate` dep fix), `uv sync --frozen` → `check_env.py` →
+`preflight.py --warm-start ...` → `ensure_lerobot.py` all pass, and a 100-step
+`smoke_test.sh` run of `pi05_b1k_wave8_d90_100` trains through the new data-loader (lerobot
+0.5.2 reads the v3.0 demo dataset fine). All 45 configs import, including the 4 new
+`pi05_b1k_task0_*` noise configs.
 
 ### ⚡ Current operational status (what to do right now)
 
-**Training is currently PAUSED — no `train.py` is running.** `run_waves.sh` stopped with
-`FATAL: wave7_d80_90 did not complete after 3 launch attempts` because the **disk filled to
-100%** (see below). To resume:
+Nothing is running. If you start a NEW training run (e.g. retrain a wave/family, or a new
+experiment):
 
-1. Check VRAM: `nvidia-smi --query-gpu=index,memory.free --format=csv,noheader`. If free VRAM
-   is < 60 GB/GPU, another process is hogging it — **tell the user it must be killed**; do NOT
-   kill it yourself.
-2. Confirm disk headroom: `df -h /` — expect ~81 GB free (freed by the 2026-08-15 cleanup). The
-   step-5000 checkpoint write for wave7 needs ~30 GB free, and wave8's staging needs ~26 GB, so
-   re-check `df -h /` before and during wave8.
-3. Once VRAM is ~80 GB free/GPU, launch the pipeline:
-   `tmux send-keys -t behavior 'bash b1k_waves/run_waves.sh 2>&1 | tee ~/train_pipeline.log' C-m`
+1. Check VRAM: `nvidia-smi --query-gpu=index,memory.free --format=csv,noheader`. Expect ~52
+   GB free/GPU (ollama holds ~28 GB/GPU by design). If free VRAM < ~47 GB/GPU, ask the user to
+   stop the model server — do NOT kill it yourself.
+2. Confirm disk headroom on the DATA volume: `df -h /tmp` (not `/` — `/` is a 66 GB PVC).
+3. Launch in tmux from the openpi root:
+   `tmux send-keys -t behavior 'cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi && bash b1k_waves/run_waves.sh 2>&1 | tee ~/train_pipeline.log' C-m`
 4. Confirm it actually started (not just init logs): `ps aux | grep 'train\.py'` + GPU util ~100%
-   on all 4 GPUs. First training step appears after a ~12 min cold start; don't kill before ~15 min.
+   on both GPUs. First training step appears after a ~12 min cold start; don't kill before ~15 min.
 5. Monitor with `.venv/bin/python b1k_waves/wave_status.py` and `tail -f b1k_waves/run_waves.log`.
 
-`run_waves.sh` will skip wave1–wave6 (COMPLETE), then **resume wave7 from step 2500** and run
-wave7 → wave8 automatically (stage → train → upload to `0Corvid0/pi05-b1k-waves` → prune).
+**Batch-size caveat (2 GPUs):** the configs keep 15,000 steps but batch 32 (was 64), so a
+re-run sees **half the samples** of the original 4-GPU run. If matching the original data
+coverage matters, double `num_train_steps` (and the cosine `decay_steps`) for that run.
 
 ### ⚠️ 2026-08-15 disk-full (EDQUOT) incident & cleanup
 
@@ -77,14 +126,15 @@ still on disk. **Recovery (2026-08-15):**
 
 ### Key facts to know
 
-- **Pod**: 4× H100. Another workload may hold ~45 GB/GPU.
-  Check `nvidia-smi` and kill it (`kill <pid>`) if free VRAM is < ~60 GB/GPU — full FT needs
-  `XLA_PYTHON_CLIENT_MEM_FRACTION=0.75` (~60 GB/GPU) and dies silently (no traceback) if it
-  can't preallocate. Do not kill it on behalf of the user; tell them it needs freeing.
+- **Pod (2026-08-27+)**: 2× H100 80 GB, 20-core cgroup quota. **ollama** holds ~28 GB/GPU and
+  is kept running (the agent's model server) — full FT runs alongside it at
+  `XLA_PYTHON_CLIENT_MEM_FRACTION=0.60` (~49 GB/GPU prealloc; ~52 GB free). If it can't
+  preallocate, training dies silently (no traceback). Do not kill the model server on behalf
+  of the user; tell them it needs freeing.
 - **Full FT, not LoRA.** `_b1k_wave_model()` returns `Pi0Config(pi05=True, action_horizon=32)`
   → `paligemma_variant="gemma_2b"` (no LoRA), so `get_freeze_filter()` is `nnx.Nothing`
-  (everything trainable). Configs set `fsdp_devices=4` to shard the ~2.4B model + fp32 Adam
-  states across the 4× H100.
+  (everything trainable). Configs set `fsdp_devices=2` and `batch_size=32` to shard the ~2.4B
+  model + fp32 Adam states across the 2× H100 (both GPUs verified at ~100% util, 2026-08-27).
 - **Frozen validation split** (`b1k_waves/frozen_val_split.json`): 18,500 train / 1,500 val
   episodes (~15/task), disjoint. `config.py` then intersects it with each run's staged
   subset — per wave (`frozen ∩ demo_lo..demo_hi`) and per family (`frozen ∩ task_ids ∩
@@ -109,8 +159,9 @@ still on disk. **Recovery (2026-08-15):**
 ### Quick status check
 
 ```bash
-cd /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi
-nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader   # free VRAM ~80 GB/GPU = ready; <60 GB = another process hogging
+cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi
+nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader   # ~52 GB free/GPU = ready (ollama resident); <47 GB = ask user to free VRAM
+df -h /tmp                                                                   # data volume (14 TB); NOT df -h /
 tmux ls                                                                # 'behavior' session = where run_waves.sh runs
 tmux capture-pane -t behavior -p -S -40                                 # live trainer output without attaching
 ps aux | grep 'train\.py' | grep -v grep                                # is training actually running?

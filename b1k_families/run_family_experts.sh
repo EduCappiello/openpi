@@ -18,7 +18,7 @@
 #   2. preflight.py         -> cwd/lerobot/warm-start/VRAM/disk checks; computes
 #                              XLA_PYTHON_CLIENT_MEM_FRACTION from free VRAM.
 #                              Aborts (does not launch) if VRAM is below the floor.
-#   3. ensure_lerobot.py    -> lerobot 0.4.4 guard before touching data.
+#   3. ensure_lerobot.py    -> lerobot version guard (uv.lock-pinned fork) before touching data.
 #   4. stage_family.py      -> task-filtered demo staging (demos 90-99), retries.
 #   5. attach-or-launch     -> scripts/train.py $CONFIG --resume --no-wandb-enabled,
 #                              bounded crash-retries; completion verified from disk
@@ -36,6 +36,8 @@ PY="$OPENPI_ROOT/.venv/bin/python"
 LOCK="$FAM_DIR/run_families.lock"
 LOG="$FAM_DIR/run_families.log"
 STAGE_WORKERS="${B1K_STAGE_WORKERS:-16}"
+# Per-wave subset HF dataset cache (~5 GB/wave) -> big volume, not "/"
+export B1K_HF_DATASET_CACHE="${B1K_HF_DATASET_CACHE:-/tmp/hf-dataset-cache}"
 MAX_LAUNCH_RETRIES=3
 MAX_STAGE_RETRIES=3
 
@@ -140,6 +142,10 @@ while true; do
       break
     fi
     log "launching training for $NAME (attempt $try/$MAX_LAUNCH_RETRIES)"
+    # Cap CPU thread pools to the pod's 20-CPU cgroup quota (see run_waves.sh).
+    OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-20}" \
+    OMP_NUM_THREADS="${OMP_NUM_THREADS:-20}" \
+    MKL_NUM_THREADS="${MKL_NUM_THREADS:-20}" \
     "$PY" scripts/train.py "$CONFIG" --resume --no-wandb-enabled \
       >>"$FAM_DIR/train_${NAME}.log" 2>&1
     rc=$?

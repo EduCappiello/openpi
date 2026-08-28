@@ -4,7 +4,23 @@ Documents the unattended `run_waves.sh` pipeline that fine-tunes `pi0.5` on the
 BEHAVIOR-1K 2026-challenge demos across GPUs. Referenced by `run_waves.sh` and
 `wave_status.py` as the design doc.
 
-> ## ⚠️ CURRENT STATE (2026-08-15): FULL-FT WAVE CHAIN MID-PROGRESS
+> ## 🔄 POD MOVED (2026-08-27): 4×H100 → 2×H100, campaign COMPLETE
+>
+> **All 8 waves are now COMPLETE (step 14999) and uploaded to `0Corvid0/pi05-b1k-waves`**,
+> and all 5 families (backbone + F1..F4) are COMPLETE and uploaded too. The machine was
+> reinstalled from the personal backup on **2026-08-27** and the training work now lives on a
+> **2× H100 80 GB, 20-core** pod (was 4× H100, 40-core). `fsdp_devices=2`, `batch_size=32`,
+> `num_workers=8`, `XLA_PYTHON_CLIENT_MEM_FRACTION=0.60` (was 0.75); data + venv + checkpoints
+> live on `/tmp` (14 TB), not `/` (66 GB PVC); the working copy is at
+> `/tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi` (was `/root/BEHAVIOR-1K/...`).
+> **ollama** holds ~28 GB/GPU and is kept running (it was a standalone llama.cpp at ~45 GB/GPU).
+> See `AGENT_PRIMER.md` for the full old-vs-new table. Everything below is still accurate for
+> *how* the pipeline works; treat its machine-specific numbers (GPU count, disk, paths,
+> VRAM) as historical.
+>
+> ---
+>
+> ## ⚠️ CURRENT STATE (2026-08-15, OLD POD): FULL-FT WAVE CHAIN MID-PROGRESS
 >
 > **This is the FULL fine-tuning campaign** (`gemma_2b`, full FT, `action_horizon=32`,
 > `fsdp_devices=4`) replacing the prior LoRA run. It is **mid-way through the wave chain**:
@@ -29,8 +45,8 @@ BEHAVIOR-1K 2026-challenge demos across GPUs. Referenced by `run_waves.sh` and
 >   so the prune safety-gate releases them on future runs (this was the gap that let the disk
 >   fill: they were uploaded but not in the set, so the prune kept them as fallback forever).
 > - **wave3 crash on 2026-08-14 was environmental, not a corrupt checkpoint.** It died three
->   ways across retries: (a) GPU OOM (`Cuda failure 2 'out of memory'`) while another
->   workload held ~44 GB/GPU; (b) `std::system_error: Resource temporarily unavailable` at the step-7500
+>   ways across retries: (a) GPU OOM (`Cuda failure 2 'out of memory'`) while `llama-server`
+>   held ~44 GB/GPU; (b) `std::system_error: Resource temporarily unavailable` at the step-7500
 >   checkpoint save — OpenBLAS `pthread_create failed for thread N of 64`, i.e. thread/CPU
 >   exhaustion because OpenBLAS/OMP/JAX spawn up to 64 threads against the pod's **40-CPU cgroup
 >   quota** (`/sys/fs/cgroup/cpu.max`); (c) the same thread failure on retry 3. Fixed in
@@ -45,7 +61,7 @@ BEHAVIOR-1K 2026-challenge demos across GPUs. Referenced by `run_waves.sh` and
 >   both `_make_wave_configs()` and `_make_family_configs()`, then **intersects it with each
 >   run's staged demo/task subset** (see "Dataset staging — Option B implemented" below) so the
 >   trainer only references media that `stage_wave.py` / `stage_family.py` actually download.
-> - **VRAM**: another concurrent workload may hold ~45 GB/GPU. Full FT needs
+> - **VRAM**: the standalone `/root/llama.cpp/llama-server` may hold ~45 GB/GPU. Full FT needs
 >   `XLA_PYTHON_CLIENT_MEM_FRACTION=0.75` (~60 GB/GPU) and dies **silently** (no traceback,
 >   whole tmux pane dies) if it cannot preallocate. Check `nvidia-smi` and free the GPU before
 >   launching. See "Launch checklist" below.
@@ -92,12 +108,14 @@ def _b1k_wave_model():
   (`get_freeze_filter()` → `nnx.Nothing`).
 - `action_horizon = 32` (matches the monolith spec in behavior_training_split.md).
 - `action_dim` stays at the Pi0Config default **32** (matches the canonical b1k checkpoints).
-- `fsdp_devices = 4` shards the ~2.4B model + fp32 Adam optimizer states across all 4 H100s,
-  keeping batch-64 per-GPU VRAM comfortably under 80 GB.
+- `fsdp_devices = 2` (this 2-GPU pod; was 4 on the old pod) shards the ~2.4B model + fp32 Adam
+  optimizer states across both H100s at `batch_size=32` (was 64), keeping per-GPU VRAM
+  ~50 GB — fits beside ollama's ~28 GB/GPU. `num_workers=8` (20-core cgroup quota).
 
-**VRAM:** full FT at batch 64 is far heavier than the old LoRA run. Tune the XLA preallocation
-pool with `XLA_PYTHON_CLIENT_MEM_FRACTION` (default 0.75 ≈ 60 GB/GPU in `run_waves.sh`).
-Free the GPU first — a concurrent ~45 GB/GPU workload cannot coexist.
+**VRAM:** full FT at batch 32 is lighter than the old 4-GPU batch-64 run but still far heavier
+than the LoRA era. Tune the XLA preallocation pool with `XLA_PYTHON_CLIENT_MEM_FRACTION`
+(default **0.60** ≈ 49 GB/GPU in `run_waves.sh`). The ollama model server (~28 GB/GPU) is
+**kept running** on this pod; if you free it, the fraction can go back up toward 0.75.
 
 ## Dataset staging — Option B implemented (2026-08-12)
 
@@ -133,8 +151,8 @@ contiguous-tail variant and are **ignored** whenever the frozen split exists (it
 - Disk is **not** unlimited on this pod — it filled to 100% on 2026-08-13 (`OS error 122:
   EDQUOT Disk quota exceeded` crashed wave3's checkpoint write at step 5000) and again on
   2026-08-15 (EDQUOT crashed wave7 at step 5000; completed-wave checkpoints 5 & 6 + stale media
-  were the culprits). Freeing space is a real, recurring need. Keep other model-server files,
-  but do not let the lerobot media cache and completed-wave checkpoints
+  were the culprits). Freeing space is a real, recurring need. Keep the `unsloth/` and `ollama`
+  model-server files, but do not let the lerobot media cache and completed-wave checkpoints
   accumulate: `reclaim.py` (run before each wave) frees stale media, and the orchestrator prunes
   a completed wave's local checkpoint only *after* its upload succeeds **and** its name is in
   `REMOTE_COMPLETE_WAVES`. After the 2026-08-15 cleanup (deleted wave5 & wave6 local checkpoints,
@@ -152,29 +170,36 @@ contiguous-tail variant and are **ignored** whenever the frozen split exists (it
 
 ## Launch checklist (current run)
 
-**Check the GPU first — another workload may be holding ~45 GB/GPU and silently kills full FT.**
+> **2026-08-27 pod:** paths below are the old pod's. On this machine the openpi root is
+> `/tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi`, check disk with `df -h /tmp`, and the
+> VRAM co-tenant is **ollama (~28 GB/GPU, kept running)** — prealloc is 0.60, not 0.75.
+> Verified-good quick check: `bash smoke_test.sh` from the openpi root (100-step smoke run).
 
-1. Check free VRAM. If < ~60 GB/GPU, free it by stopping the process holding GPU memory:
+**Check the GPU first — `llama-server` may be holding ~45 GB/GPU and silently kills full FT.**
+
+1. Check free VRAM. If < ~60 GB/GPU, free it (standalone llama.cpp only — never `ollama`):
    ```bash
    nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader   # expect ~80 GB free/GPU
+    pkill -f "/root/llama.cpp/llama-server"     # frees ~45 GB/GPU (do this yourself — an agent must not kill it on your behalf)
    ```
    A full-FT launch with insufficient VRAM dies **silently** (no traceback) right after the
    dataset-init logs, while XLA preallocates ~60 GB/GPU. The whole `behavior` tmux pane/process
    group dies. Symptom: `train.py` disappears moments after `hf_dataset cache HIT`, no error in
    `train_wave*.log`. (Alternatively, if you instead see `Cuda failure 2 'out of memory'` in the
-   NCCL logs, that is the same VRAM contention mid-training.)
+   NCCL logs, that is the same llama-server VRAM contention mid-training.)
 2. **CPU thread exhaustion is fixed in `run_waves.sh`** (caps `OPENBLAS_NUM_THREADS` /
-   `OMP_NUM_THREADS` / `MKL_NUM_THREADS=40`). If a wave still dies at a checkpoint save with
-   `std::system_error: Resource temporarily unavailable` / `pthread_create failed`, that is the
-   40-CPU cgroup quota (`/sys/fs/cgroup/cpu.max`) being over-subscribed; verify the thread caps
-   are applied on the `train.py` line in `run_waves.sh` before re-launching.
+   `OMP_NUM_THREADS` / `MKL_NUM_THREADS` — **20** on this pod, was 40). If a wave still dies at
+   a checkpoint save with `std::system_error: Resource temporarily unavailable` /
+   `pthread_create failed`, that is the 20-core cgroup quota (`/sys/fs/cgroup/cpu.max`) being
+   over-subscribed; verify the thread caps are applied on the `train.py` line in
+   `run_waves.sh` before re-launching.
 3. Launch the wave chain in the `behavior` tmux session (already created; the shell is at the
    openpi root):
    ```bash
    tmux send-keys -t behavior 'bash b1k_waves/run_waves.sh 2>&1 | tee ~/train_pipeline.log' C-m
    ```
-   (To create it fresh if missing:
-   `tmux new-session -d -s behavior -c /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi`)
+    (To create it fresh if missing, on this pod:
+    `tmux new-session -d -s behavior -c /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi`)
  4. `run_waves.sh` auto-fetches the arm0 warm-start base from HF (idempotent), then runs
     **wave5 → wave8** in order (wave1–wave4 are already COMPLETE and skipped). Confirm
     progress:
@@ -194,15 +219,18 @@ disk on every iteration — checkpoints, the episode ledger, and the lerobot cac
 never from its own memory, so it is safe to kill and restart at any point.
 
 Loop, per wave:
-1. **lerobot version guard** (`ensure_lerobot.py`) — the one real outage this
-   campaign hit was a `uv sync` elsewhere silently downgrading lerobot
-   0.4.4 → 0.3.4, which can't read the v3.0 dataset layout and crashes training
-   on next launch. Checked and fixed before anything else runs.
+1. **lerobot version guard** (`ensure_lerobot.py`) — the real outages this campaign
+   hit were a stray `uv sync` silently downgrading lerobot (breaking v3.0 dataset
+   layout), and -- after `uv.lock` moved to the wensi-ai/lerobot `release/b1k` fork
+   (0.5.2) -- a stale PyPI 0.4.4 install lacking the fork's `accelerate` runtime dep,
+   which breaks the data-loader import path. The guard compares the installed version
+   to the one pinned in `uv.lock` and, on mismatch, runs `uv sync --frozen` to rebuild
+   the exact locked env. Checked before anything else runs.
 2. **Reclaim disk** (`reclaim.py`) — deletes cached media not needed by any
    incomplete wave.
 3. **Stage media** (`stage_wave.py`) for the wave's demo range, with retries.
 3b. **Compute norm stats** (`compute_norm_stats.py --config-name pi05_b1k`) — a long-running IO-heavy pass over all staged episodes (~22 k on arm0). Run inside a tmux session so it survives disconnects; progress can be monitored with `tmux capture-pane -t <session> -p`. All waves share the same norm stats from the arm0 assets dir (`outputs/assets/pi05_b1k/`), so this only needs to run once before any wave. If running for a fresh base config, expect 3–4 h on a single CPU.
-4. **Warm-start**: the **config default chain** (`_make_wave_configs()`) wires each wave to inherit the **local** previous-wave checkpoint (wave1 → arm0 base, which `run_waves.sh` fetches from HF via `snapshot_download()` if absent). No `B1K_WARM_START_PARAMS` override is needed. GPU memory reserved with `XLA_PYTHON_CLIENT_MEM_FRACTION=0.75` (~60 GB); with `fsdp_devices=4` full-FT the per-GPU model footprint is small enough that 0.75 fits comfortably.
+4. **Warm-start**: the **config default chain** (`_make_wave_configs()`) wires each wave to inherit the **local** previous-wave checkpoint (wave1 → arm0 base, which `run_waves.sh` fetches from HF via `snapshot_download()` if absent). No `B1K_WARM_START_PARAMS` override is needed. GPU memory reserved with `XLA_PYTHON_CLIENT_MEM_FRACTION=0.60` (~49 GB) on this pod; with `fsdp_devices=2` / batch 32 full-FT the per-GPU footprint fits beside ollama's ~28 GB.
 5. **Attach-or-launch**: if a `scripts/train.py <config>` process for this wave is already running (e.g. launched manually, or by a still-running earlier invocation), it waits on that pid instead of starting a second one — two processes writing the same orbax checkpoint dir would corrupt it and fight over GPU memory.
 6. **Launch/resume in the foreground** with up to 3 crash-retries, always with `--resume` (safe unconditionally — empty checkpoint dir means fresh warm start from the prior wave's params, partial dir means resume that wave).
 7. **Verify completion from disk**, not from `train.py`'s exit code — a caught exception can still exit 0. `wave_status.py --check <wave>` checks whether `{checkpoint_dir}/{final_step}/params` exists.
@@ -256,13 +284,13 @@ The arm0 checkpoint is preserved in HF as `arm0_monolithic_30ep/params` under
 - Logs: `train_wave{N}_d{lo}_{hi}.log` and `run_waves.log` live in this directory (`b1k_waves/`). Training progress appears as `[I] Progress on: Xit/Ykit rate:Z it/s` lines (not `Step N:` format).
 - **On this pod**, training runs inside the tmux session named `behavior`. Detach with Ctrl-b d.
 - Checkpoints: `../outputs/checkpoints/pi05_b1k_wave{N}_d{lo}_{hi}/wave{N}_d{lo}_{hi}/{step}/` (~13 GB per wave's kept checkpoint; `keep_period` prunes intermediate steps). Pruned after upload to the gated waves repo.
-- Config: `../src/openpi/training/config.py`, `_make_wave_configs()` — wave `TrainConfig`s are generated programmatically (batch size 64, `pi05` model, `action_horizon=32`, `fsdp_devices=4`, **full FT `gemma_2b`**) rather than hand-declared per wave.
+- Config: `../src/openpi/training/config.py`, `_make_wave_configs()` — wave `TrainConfig`s are generated programmatically (batch size 32, `pi05` model, `action_horizon=32`, `fsdp_devices=2`, `num_workers=8`, **full FT `gemma_2b`**) rather than hand-declared per wave.
 
 ## Verifying status / continuing waves
 
 **Check if training is running:**
 ```bash
-cd /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi
+cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi
 
 # 1. Is train.py alive?
 ps aux | grep 'train\.py' | grep -v grep
@@ -294,14 +322,14 @@ grep 'warm-start:' b1k_waves/run_waves.log | tail -3
 
 **Continue training after disconnect/reboot:**
 ```bash
-tmux send-keys -t behavior 'cd /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi && bash b1k_waves/run_waves.sh 2>&1 | tee ~/train_pipeline.log' C-m
+tmux send-keys -t behavior 'cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi && bash b1k_waves/run_waves.sh 2>&1 | tee ~/train_pipeline.log' C-m
 ```
 The script is idempotent: it picks up the next incomplete wave and resumes from the last local checkpoint. Waves advance automatically — when the current wave completes, `run_waves.sh` uploads it to HF, prunes old checkpoints, then starts the next wave (no manual intervention needed).
 
 ## Verifying status yourself
 
 ```bash
-cd /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi
+cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi
 .venv/bin/python b1k_waves/wave_status.py          # synced ledger status + next wave
 nvidia-smi                                          # GPU utilization/memory
 tmux attach -t behavior                             # live trainer output (detach: Ctrl-b d)
@@ -313,7 +341,7 @@ Healthy signs (what a *running* run looks like):
   `[I] Progress on: Xit/15.0kit rate:... remaining:...` (the current format; the older
   `Step N: grad_norm=..., loss=...` + tqdm bar was from the LoRA-era run and is not produced now).
 - `nvidia-smi` shows one `scripts/train.py` process on **every** GPU, each at
-  ~100% util and ~62 GB memory (fits beside a ~16 GB concurrent workload on an 80 GB H100).
+  ~100% util and ~62 GB memory (fits beside ollama's ~16 GB on an 80 GB H100).
 - Loss in the low tens on step 0 for a warm-started model, then decreasing.
 
 Two gotchas learned the hard way:
@@ -384,7 +412,7 @@ The gated waves repo (`0Corvid0/pi05-b1k-waves`) replaces the old per-wave repos
 
 **Launching via run_waves.sh (recommended — sequential, self-managing):**
 ```bash
-cd /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi
+cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi
 tmux new-session -d -s behavior "bash b1k_waves/run_waves.sh"   # or attach an existing 'behavior' session
 tmux send-keys -t behavior "bash b1k_waves/run_waves.sh" C-m
 ```
@@ -393,15 +421,19 @@ The script fetches the arm0 base from HF if absent, then handles warm-start (con
 
 **Manual single-wave launch (advanced):**
 ```bash
-cd /root/BEHAVIOR-1K/b1k-baselines/baselines/openpi
+cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi
 B1K_WARM_START_PARAMS="./outputs/checkpoints/pi05_b1k/arm0_monolithic/49999/params" \
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.75 \
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.60 \
 .venv/bin/python scripts/train.py pi05_b1k_wave1_d30_38 --no-wandb-enabled
 ```
 
 Notes:
-- **Full FT + FSDP.** `_b1k_wave_model()` sets `fsdp_devices=4`, sharding the 2.4B model + fp32 Adam states across all 4 GPUs. `jax.device_count()` = 4; `batch_size=64` → 16 samples/GPU.
-- **`XLA_PYTHON_CLIENT_MEM_FRACTION=0.75` (~60 GB)** is the preallocation pool; with `fsdp_devices=4` full-FT fits comfortably. Free the GPU (stop any ~45 GB/GPU concurrent workload) before launching — it cannot coexist with batch-64 full-FT.
+- **Full FT + FSDP (2-GPU pod).** `_b1k_wave_model()` + generated configs use `fsdp_devices=2`,
+  sharding the 2.4B model + fp32 Adam states across both GPUs. `jax.device_count()` = 2;
+  `batch_size=32` → 16 samples/GPU (same per-GPU sample count as the old 4-GPU batch-64 run).
+- **`XLA_PYTHON_CLIENT_MEM_FRACTION=0.60` (~49 GB)** is the preallocation pool; with
+  `fsdp_devices=2` full-FT fits beside ollama's ~28 GB/GPU (kept running on this pod). If you
+  free the model server, the fraction can go back up toward 0.75.
 - Each wave is 15,000 steps on **its own frozen∩demo-window train subset** (~735–935 episodes;
   see "Dataset staging — Option B implemented"). To download data without training, run
   `stage_wave.py` directly — do **not** run `run_waves.sh`, which stages **and trains**.

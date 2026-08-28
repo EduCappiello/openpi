@@ -37,13 +37,15 @@ PY="$OPENPI_ROOT/.venv/bin/python"
 LOCK="$WAVES_DIR/run_waves.lock"
 LOG="$WAVES_DIR/run_waves.log"
 STAGE_WORKERS="${B1K_STAGE_WORKERS:-16}"
+# Per-wave subset HF dataset cache (~5 GB/wave) -> big volume, not "/"
+export B1K_HF_DATASET_CACHE="${B1K_HF_DATASET_CACHE:-/tmp/hf-dataset-cache}"
 MAX_LAUNCH_RETRIES=3
 REPO_ID="0Corvid0/pi05-b1k-waves"
 
-# GPU memory: FULL fine-tuning with fsdp_devices=4 shards the ~2.4B model + fp32 Adam
-# states across 4x H100 80 GB. Preallocate 0.75 (~60 GB/GPU) for training so the XLA
-# pool fits alongside any model server; lower the floor (e.g. 0.60) only if needed.
-export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.75}"
+# GPU memory: FULL fine-tuning with fsdp_devices=2 shards the ~2.4B model + fp32 Adam
+# states across 2x H100 80 GB. Preallocate 0.60 (~48 GB/GPU) so the XLA pool fits
+# alongside the resident model server (~28 GB/GPU); raise if the server is killed.
+export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.60}"
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
 
@@ -169,12 +171,12 @@ while true; do
       break
     fi
     log "launching training for $NAME (attempt $try/$MAX_LAUNCH_RETRIES)"
-    # Cap CPU thread pools to the pod's cgroup cpu quota (40 CPUs). OpenBLAS/OMP/JAX
+    # Cap CPU thread pools to the pod's cgroup cpu quota (20 CPUs). OpenBLAS/OMP/JAX
     # otherwise spawn up to 64 threads and die at checkpoint-save with
     # "std::system_error: Resource temporarily unavailable" / "pthread_create failed".
-    OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-40}" \
-    OMP_NUM_THREADS="${OMP_NUM_THREADS:-40}" \
-    MKL_NUM_THREADS="${MKL_NUM_THREADS:-40}" \
+    OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-20}" \
+    OMP_NUM_THREADS="${OMP_NUM_THREADS:-20}" \
+    MKL_NUM_THREADS="${MKL_NUM_THREADS:-20}" \
     "$PY" scripts/train.py "$CONFIG" --resume --no-wandb-enabled \
       >>"$WAVES_DIR/train_${NAME}.log" 2>&1
     rc=$?

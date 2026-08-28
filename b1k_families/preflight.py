@@ -3,7 +3,8 @@
 Runs from the openpi repo root (checkpoint paths are cwd-relative). Checks, in
 order:
   1. cwd guard      -- must be the openpi repo root.
-  2. lerobot guard  -- venv lerobot == 0.4.4 (v3.0 dataset layout support).
+  2. lerobot guard  -- venv lerobot == version pinned in uv.lock (the wensi-ai
+                       lerobot release/b1k fork, 0.5.2; v3.0 dataset layout support).
   3. warm-start     -- the --warm-start <path> checkpoint has params/ on disk.
   4. VRAM           -- XLA_PYTHON_CLIENT_MEM_FRACTION auto-computed from free VRAM:
                           FRAC = (MIN_FREE - SAFETY_MIB) / TOTAL
@@ -27,11 +28,13 @@ SAFETY_MIB = int(os.environ.get("B1K_MEM_SAFETY_MIB", "4096"))
 CAP = float(os.environ.get("B1K_MEM_FRACTION_CAP", "0.85"))
 # NOTE (build agent, 2026-08-06): floor tuned to the TRUE training need, not XLA
 # preallocation. Real peak for batch-64/horizon-50 pi05 is ~35-48 GB/GPU; 0.60
-# (~49 GB free) covers the worst case with margin. This lets a modest concurrent
-# workload (~13 GB/GPU) coexist with training. A large (~44 GB/GPU) concurrent
-# workload does NOT fit alongside batch-64 training (44+48 > 80); that combination
-# requires a smaller batch (e.g. 32) or dedicated GPUs.
-FLOOR = float(os.environ.get("B1K_MEM_FRACTION_FLOOR", "0.60"))
+# (~49 GB free) covers the worst case with margin. This lets a modest model server
+# (e.g. Qwen3.6 27B via ollama, ~13 GB/GPU) coexist with training. It does NOT
+# permit a ~44 GB/GPU DeepSeek V4 Flash alongside batch-64 training (44+48 > 80);
+# that combination requires a smaller batch (e.g. 32) or dedicated GPUs.
+# 2-GPU pod with the resident model server (~28 GB/GPU): best achievable fraction is
+# (81559-28666-4096)/81559 ~= 0.59, so the floor must sit below that or every run FATALs.
+FLOOR = float(os.environ.get("B1K_MEM_FRACTION_FLOOR", "0.59"))
 MIN_DISK_GB = float(os.environ.get("B1K_MIN_DISK_GB", "40"))
 REQUIRED_LEROBOT = "0.4.4"
 
@@ -49,16 +52,33 @@ def check_cwd():
     return True
 
 
+def _required_lerobot():
+    """Version pinned in uv.lock (single source of truth; tracks the wensi-ai fork)."""
+    lock = _OPENPI_ROOT / "uv.lock"
+    try:
+        text = lock.read_text()
+    except OSError:
+        return REQUIRED_LEROBOT
+    for block in text.split("[[package]]"):
+        if 'name = "lerobot"' in block:
+            for line in block.splitlines():
+                line = line.strip()
+                if line.startswith("version = "):
+                    return line.split("=", 1)[1].strip().strip('"')
+    return REQUIRED_LEROBOT
+
+
 def check_lerobot():
+    required = _required_lerobot()
     try:
         import lerobot
-        ok = lerobot.__version__ == REQUIRED_LEROBOT
+        ok = lerobot.__version__ == required
     except ImportError:
         ok = False
     if ok:
-        print(f"lerobot OK ({REQUIRED_LEROBOT})")
+        print(f"lerobot OK ({required})")
     else:
-        print(f"FATAL: lerobot wrong/missing (need {REQUIRED_LEROBOT}). Run b1k_waves/ensure_lerobot.py then retry.")
+        print(f"FATAL: lerobot wrong/missing (need {required}). Run b1k_waves/ensure_lerobot.py then retry.")
     return ok
 
 
@@ -118,7 +138,7 @@ def check_vram():
     if frac < FLOOR:
         print(f"FATAL: computed FRAC {frac:.3f} < floor {FLOOR:.3f}. Need >= {FLOOR:.3f} "
               f"(approx {int(FLOOR*total)} MiB free per GPU).")
-        print("  Free VRAM: stop any processes holding GPU memory, then re-run.")
+        print("  Free VRAM: stop the llama.cpp/ollama serving processes, then re-run.")
         try:
             subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_gpu_memory,name",
                             "--format=csv,noheader"], text=True)
@@ -130,9 +150,12 @@ def check_vram():
 
 
 def check_disk():
-    free = shutil.disk_usage("/").free / 1e9
+    # Data/checkpoints live on the big volume (B1K_DATA_VOLUME), not on "/" --
+    # check the volume that actually holds the lerobot cache.
+    vol = os.environ.get("B1K_DATA_VOLUME", "/tmp/hf-cache")
+    free = shutil.disk_usage(vol).free / 1e9
     ok = free >= MIN_DISK_GB
-    print(f"disk: {free:.0f} GB free (require {MIN_DISK_GB:.0f} GB) -> {'OK' if ok else 'FATAL'}")
+    print(f"disk: {free:.0f} GB free at {vol} (require {MIN_DISK_GB:.0f} GB) -> {'OK' if ok else 'FATAL'}")
     return ok
 
 

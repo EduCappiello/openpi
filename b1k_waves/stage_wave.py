@@ -84,7 +84,8 @@ def stage(lo, hi, workers=16, dry_run=False):
     df = meta()
     paths, sub = wave_files(df, lo, hi)
     todo = [p for p in paths if not (ROOT / p).exists()]
-    free = os.statvfs("/").f_bavail * os.statvfs("/").f_frsize / 1e9
+    vol = str(ROOT)  # data volume (lerobot cache root), not "/"
+    free = os.statvfs(vol).f_bavail * os.statvfs(vol).f_frsize / 1e9
     print(f"wave demos {lo}..{hi}: {len(sub)} episodes, {sub.length.sum()/1e6:.1f}M frames")
     print(f"files: {len(paths)} total | {len(paths)-len(todo)} already local | {len(todo)} to fetch")
     print(f"disk free: {free:.0f} GB")
