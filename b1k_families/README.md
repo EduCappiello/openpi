@@ -10,7 +10,7 @@ foundation**, from the **wave8** checkpoint, on the BEHAVIOR-1K 2026-challenge d
 > 4× H100, 40-core), so the configs were retuned to **`fsdp_devices=2`, `batch_size=32`,
 > `num_workers=8`**, `XLA_PYTHON_CLIENT_MEM_FRACTION` 0.60 (families: `preflight.py` computes
 > ~0.593 live; floor lowered to 0.59), and the data/venv/checkpoints live on `/tmp` (14 TB)
-> with the working copy at `/tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi`. **ollama**
+> with the working copy at `/tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi`. **the model server**
 > holds ~28 GB/GPU and is kept running. Re-running `run_family_experts.sh` now would **retrain
 > from scratch** (local checkpoints are pruned) — only do that on purpose. See
 > `b1k_waves/AGENT_PRIMER.md` for the full old-vs-new table.
@@ -100,18 +100,18 @@ abort if FRAC < B1K_MEM_FRACTION_FLOOR                      # floor default 0.59
 ```
 
 **This pod's floor is tuned to 0.59** (`B1K_MEM_FRACTION_FLOOR`, in
-`preflight.py`): with ollama holding ~28.7 GB/GPU the best achievable fraction is
+`preflight.py`): with the model server holding ~28.7 GB/GPU the best achievable fraction is
 (81559 − 28666 − 4096)/81559 ≈ 0.593, so the floor must sit below that or every run FATALs.
-Proven working: 0.593 with ollama resident, ~49 GB preallocated, batch-32 full-FT.
+Proven working: 0.593 with the model server resident, ~49 GB preallocated, batch-32 full-FT.
 
 - **Full-FT + FSDP:** the model is `gemma_2b` full fine-tune with **`fsdp_devices=2`**
   (this 2-GPU pod), which shards the 2.4B model + fp32 Adam optimizer states across the 2
   GPUs — per-GPU footprint ≈ 50 GB at batch 32 (verified 2026-08-27).
 - Manual override: set `B1K_MEM_FRACTION`.
-- **VRAM hogs.** This pod runs the agent's **ollama** (`ollama serve` + its child
-  `/root/lib/ollama/llama-server`, ~28 GB/GPU while a model is loaded). **Keep ollama
+- **VRAM hogs.** This pod runs a resident model server (a daemon + its child
+  `the model server's inference process`, ~28 GB/GPU while a model is loaded). **Keep the model server
   running** — training is tuned to run alongside it (that's why the floor is 0.59). If you
-  must free VRAM, stop it yourself (`kill <llama-server pid>`); never `pkill -f ollama`
+  must free VRAM, stop it yourself (`kill <the inference server pid>`); never `pkill` by pattern
   blindly. At fully-free GPUs preflight yields the 0.85 cap — raise the fraction if you do.
 - Do not lower the floor below ~0.59: preflight would pass but XLA would preallocate too
   little and training would OOM mid-run.
@@ -139,7 +139,7 @@ bash b1k_families/run_family_experts.sh
 .venv/bin/python b1k_families/next_family_info.py
 
 # Manual single-family launch (backbone first, then each expert)
-# (0.60 is this pod's value with ollama resident; 0.75 only after freeing it)
+# (0.60 is this pod's value with the model server resident; 0.75 only after freeing it)
 B1K_FAMILY_WARM_START_PARAMS="./outputs/checkpoints/pi05_b1k_wave8_d90_100/wave8_d90_100/14999/params" \
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.60 \
 .venv/bin/python scripts/train.py pi05_b1k_backbone_foundation --no-wandb-enabled

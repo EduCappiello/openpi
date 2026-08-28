@@ -62,7 +62,7 @@ The old 4×H100 pod is gone. Key differences from every doc written before 2026-
 | Working copy | `/root/BEHAVIOR-1K/...` | **`/tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi`** (re-clone + overlay per the backup README) |
 | Full-FT config | `fsdp_devices=4`, batch 64, `num_workers=32` | **`fsdp_devices=2`, batch 32, `num_workers=8`** (edited in `config.py` for this pod) |
 | XLA mem fraction | 0.75 | **0.60** in `run_waves.sh`; families: `preflight.py` computes ~0.593 live, floor lowered to **0.59** |
-| VRAM co-tenant | standalone `/root/llama.cpp/llama-server` ~45 GB/GPU | **ollama** (`/root/lib/ollama/llama-server`) **~28 GB/GPU — kept running on purpose**; ~52 GB free/GPU for training |
+| VRAM co-tenant | standalone inference server ~45 GB/GPU | **the model server** (~28 GB/GPU on its inference process) **kept running on purpose**; ~52 GB free/GPU for training |
 | Thread caps | 40 | **20** (capped in both orchestrators) |
 | HF dataset cache | `~/.cache/b1k_hf_subset` on `/` | **`B1K_HF_DATASET_CACHE=/tmp/hf-dataset-cache`** (set in both orchestrators) |
 
@@ -89,7 +89,7 @@ Nothing is running. If you start a NEW training run (e.g. retrain a wave/family,
 experiment):
 
 1. Check VRAM: `nvidia-smi --query-gpu=index,memory.free --format=csv,noheader`. Expect ~52
-   GB free/GPU (ollama holds ~28 GB/GPU by design). If free VRAM < ~47 GB/GPU, ask the user to
+   GB free/GPU (the model server holds ~28 GB/GPU by design). If free VRAM < ~47 GB/GPU, ask the user to
    stop the model server — do NOT kill it yourself.
 2. Confirm disk headroom on the DATA volume: `df -h /tmp` (not `/` — `/` is a 66 GB PVC).
 3. Launch in tmux from the openpi root:
@@ -126,7 +126,7 @@ still on disk. **Recovery (2026-08-15):**
 
 ### Key facts to know
 
-- **Pod (2026-08-27+)**: 2× H100 80 GB, 20-core cgroup quota. **ollama** holds ~28 GB/GPU and
+- **Pod (2026-08-27+)**: 2× H100 80 GB, 20-core cgroup quota. **the model server** holds ~28 GB/GPU and
   is kept running (the agent's model server) — full FT runs alongside it at
   `XLA_PYTHON_CLIENT_MEM_FRACTION=0.60` (~49 GB/GPU prealloc; ~52 GB free). If it can't
   preallocate, training dies silently (no traceback). Do not kill the model server on behalf
@@ -160,7 +160,7 @@ still on disk. **Recovery (2026-08-15):**
 
 ```bash
 cd /tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi
-nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader   # ~52 GB free/GPU = ready (ollama resident); <47 GB = ask user to free VRAM
+nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader   # ~52 GB free/GPU = ready (the model server resident); <47 GB = ask user to free VRAM
 df -h /tmp                                                                   # data volume (14 TB); NOT df -h /
 tmux ls                                                                # 'behavior' session = where run_waves.sh runs
 tmux capture-pane -t behavior -p -S -40                                 # live trainer output without attaching

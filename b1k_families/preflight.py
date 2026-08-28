@@ -29,8 +29,8 @@ CAP = float(os.environ.get("B1K_MEM_FRACTION_CAP", "0.85"))
 # NOTE (build agent, 2026-08-06): floor tuned to the TRUE training need, not XLA
 # preallocation. Real peak for batch-64/horizon-50 pi05 is ~35-48 GB/GPU; 0.60
 # (~49 GB free) covers the worst case with margin. This lets a modest model server
-# (e.g. Qwen3.6 27B via ollama, ~13 GB/GPU) coexist with training. It does NOT
-# permit a ~44 GB/GPU DeepSeek V4 Flash alongside batch-64 training (44+48 > 80);
+# (e.g. a ~13 GB/GPU model served by the model server) coexist with training. It does NOT
+# permit a ~44 GB/GPU workload alongside batch-64 training (44+48 > 80);
 # that combination requires a smaller batch (e.g. 32) or dedicated GPUs.
 # 2-GPU pod with the resident model server (~28 GB/GPU): best achievable fraction is
 # (81559-28666-4096)/81559 ~= 0.59, so the floor must sit below that or every run FATALs.
@@ -138,7 +138,7 @@ def check_vram():
     if frac < FLOOR:
         print(f"FATAL: computed FRAC {frac:.3f} < floor {FLOOR:.3f}. Need >= {FLOOR:.3f} "
               f"(approx {int(FLOOR*total)} MiB free per GPU).")
-        print("  Free VRAM: stop the llama.cpp/ollama serving processes, then re-run.")
+        print("  Free VRAM: stop the inference/model-server processes, then re-run.")
         try:
             subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_gpu_memory,name",
                             "--format=csv,noheader"], text=True)
