@@ -46,6 +46,31 @@
 >   `QUEUED` (backbone stays COMPLETE). If a families re-run is intended, this is the starting
 >   state; local checkpoints for F1–F4 were pruned on this pod.
 
+### 🚦 Branching & PR policy (2026-08-28, from allenwang)
+
+Training and evaluation are being kept isolated. `train` is the **training** branch and is
+currently compatible with the **evaluation** branch. The rules:
+
+1. **`train` is the integration point.** Do not commit new training-method experiments
+   directly to `train`.
+2. **To try a different training method: branch off `train`** (e.g.
+   `git checkout -b exp/<name> train`), develop + train there.
+3. **New checkpoint / working result → open a PR against `train`.** allenwang reviews it
+   and pulls whatever **inference-side** code the evaluation needs from the PR into the
+   evaluation branch himself. So: the PR must be self-contained (training config, model
+   changes, any inference/serve changes it implies, and the checkpoint location), and you
+   do NOT edit the evaluation branch.
+4. Keep the evaluation branch isolated — never push training experiment code to it.
+
+This keeps the codebase maintainable: `train` stays a clean, known-good training state;
+each experiment is a reviewable branch/PR; evaluation stays decoupled and only receives
+vetted inference-side pieces.
+
+**Practical consequence for the correlated-noise work:** the 4 `pi05_b1k_task0_*`
+configs on `train` are the shared baseline. If you run variants (different beta, noise
+schedule, LoRA rank, etc.), do it on an `exp/*` branch and PR the winner — do not mutate
+the task0 configs on `train` directly.
+
 **Campaign state: ALL WAVES AND ALL FAMILIES are COMPLETE (step 14999) and uploaded to HF.**
 There is nothing left in the queue — `run_waves.sh` is a no-op and
 `run_family_experts.sh` would retrain from scratch (local checkpoints are pruned; completion is
@@ -62,7 +87,7 @@ The old 4×H100 pod is gone. Key differences from every doc written before 2026-
 | Working copy | `/root/BEHAVIOR-1K/...` | **`/tmp/b1k/BEHAVIOR-1K/b1k-baselines/baselines/openpi`** (re-clone + overlay per the backup README) |
 | Full-FT config | `fsdp_devices=4`, batch 64, `num_workers=32` | **`fsdp_devices=2`, batch 32, `num_workers=8`** (edited in `config.py` for this pod) |
 | XLA mem fraction | 0.75 | **0.60** in `run_waves.sh`; families: `preflight.py` computes ~0.593 live, floor lowered to **0.59** |
-| VRAM co-tenant | standalone inference server ~45 GB/GPU | **the model server** (~28 GB/GPU on its inference process) **kept running on purpose**; ~52 GB free/GPU for training |
+| VRAM co-tenant | a standalone inference server ~45 GB/GPU | **the model server** (`the model server's inference process`) **~28 GB/GPU — kept running on purpose**; ~52 GB free/GPU for training |
 | Thread caps | 40 | **20** (capped in both orchestrators) |
 | HF dataset cache | `~/.cache/b1k_hf_subset` on `/` | **`B1K_HF_DATASET_CACHE=/tmp/hf-dataset-cache`** (set in both orchestrators) |
 
