@@ -53,6 +53,16 @@
 >   `QUEUED` (backbone stays COMPLETE). If a families re-run is intended, this is the starting
 >   state; local checkpoints for F1–F4 were pruned on this pod.
 
+> **⚠️ Pod-compat state (2026-08-28): this pod runs `exp/pod-compat-2gpu`, NOT `train`.**
+> The 2-GPU values, `/mnt→./outputs` task0 path fix, `accelerate` dep fix, guard updates,
+> and the duplicate-`_CONFIGS` bug fix were moved OFF `train` and live on
+> **`exp/pod-compat-2gpu`** (open a PR → train per the policy below). Remote `train` is
+> back at allenwang's `00f75a7` (his code, his 4-GPU path defaults — it does NOT run on
+> this pod as-is: no `accelerate` in the lock, `/mnt/train-data-1-hdd` paths, `fsdp_devices=4`).
+> The local working tree is checked out on `exp/pod-compat-2gpu` so training keeps working.
+> When the PR merges: `git fetch origin && git merge origin/train` (or rebase the exp
+> branch) and switch back to `train`.
+
 ### 🚦 Branching & PR policy (2026-08-28, from allenwang)
 
 Training and evaluation are being kept isolated. `train` is the **training** branch and is
