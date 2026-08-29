@@ -88,7 +88,7 @@ def main(
 
     output_path = pathlib.Path(
         output
-        or "/mnt/train-data-1-hdd/b1k-challenge/openpi_experiments/assets/pi05_b1k_task0/action_cholesky.npy"
+        or "./outputs/assets/pi05_b1k_task0/action_cholesky.npy"
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(output_path, chol)

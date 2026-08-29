@@ -1378,7 +1378,7 @@ def _make_task0_noise_configs() -> list[TrainConfig]:
     # trick as `_B1K_ARM0_ASSETS` below, which points every wave at arm0's real assets dir.
     # Run once: `uv run scripts/compute_norm_stats.py --config-name pi05_b1k_task0_lora_gauss`.
     task0_assets = AssetsConfig(
-        assets_dir="/mnt/train-data-1-hdd/b1k-challenge/openpi_experiments/assets/pi05_b1k_task0_lora_gauss",
+        assets_dir="./outputs/assets/pi05_b1k_task0_lora_gauss",
         asset_id=B1K_REPO_ID,
     )
     data = LeRobotB1KDataConfig(
@@ -1392,7 +1392,7 @@ def _make_task0_noise_configs() -> list[TrainConfig]:
     lora_model = pi0_config.Pi0Config(pi05=True, action_horizon=32, paligemma_variant="gemma_2b_lora")
     full_model = pi0_config.Pi0Config(pi05=True, action_horizon=32)
     noise_cholesky_path = (
-        "/mnt/train-data-1-hdd/b1k-challenge/openpi_experiments/assets/pi05_b1k_task0/action_cholesky.npy"
+        "./outputs/assets/pi05_b1k_task0/action_cholesky.npy"
     )
     common = dict(
         project_name="B1K",
@@ -1409,8 +1409,8 @@ def _make_task0_noise_configs() -> list[TrainConfig]:
         val_repo_id=B1K_REPO_ID,
         val_episodes_index=B1K_TASK0_VAL_EPISODES,
         val_num_batches=5,
-        assets_base_dir="/mnt/train-data-1-hdd/b1k-challenge/openpi_experiments/assets",
-        checkpoint_base_dir="/mnt/train-data-1-hdd/b1k-challenge/openpi_experiments/checkpoints",
+        assets_base_dir="./outputs/assets",
+        checkpoint_base_dir="./outputs/checkpoints",
         num_workers=8,
         noise_real_action_dim=23,
     )
@@ -1450,9 +1450,6 @@ def _make_task0_noise_configs() -> list[TrainConfig]:
             **common,
         ),
     ]
-
-
-_CONFIGS = [*_CONFIGS, *_make_wave_configs(), *_make_family_configs(), *_make_task0_noise_configs()]
 
 
 _CONFIGS = [*_CONFIGS, *_make_wave_configs(), *_make_family_configs(), *_make_task0_noise_configs()]

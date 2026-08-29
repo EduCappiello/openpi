@@ -38,10 +38,17 @@
 > - **Hardware in configs = this pod (2-GPU).** Wave/family blocks use `fsdp_devices=2`,
 >   `batch_size=32`, `num_workers=8` (the old 4-GPU values are gone with the old pod). The 4
 >   task0 configs use `fsdp_devices=1` (lora) / `2` (full).
-> - **⚠️ task0 asset paths point at `/mnt/train-data-1-hdd/...`** (allenwang's storage) which
->   does NOT exist on this pod. Before running any `pi05_b1k_task0_*` config, either mount
->   that path or override `assets_dir`/`assets_base_dir`/`checkpoint_base_dir`/
->   `noise_cholesky_path` locally. Do not assume they work as-is.
+> - **task0 asset paths (fixed 2026-08-28):** allenwang's configs pointed at
+>   `/mnt/train-data-1-hdd/...` (his storage, absent here). Now local:
+>   `assets_base_dir=./outputs/assets`, `checkpoint_base_dir=./outputs/checkpoints`,
+>   norm stats at `./outputs/assets/pi05_b1k_task0_lora_gauss` (all 4 configs share it —
+>   compute ONCE with the `lora_gauss` name), `noise_cholesky_path=
+>   ./outputs/assets/pi05_b1k_task0/action_cholesky.npy` (same default in
+>   `scripts/compute_action_covariance.py`). Run order per config:
+>   `compute_norm_stats.py --config-name pi05_b1k_task0_lora_gauss` →
+>   `compute_action_covariance.py` → the 4 `train.py` runs. Data/val episodes auto-fetch
+>   from HF (verified). Also fixed a merge bug: the `_CONFIGS = [...]` line was
+>   duplicated (17 configs double-registered in the list).
 > - **`family_ledger.json` reset** (allenwang's commit): F1–F4 `COMPLETE (step 14999)` →
 >   `QUEUED` (backbone stays COMPLETE). If a families re-run is intended, this is the starting
 >   state; local checkpoints for F1–F4 were pruned on this pod.
