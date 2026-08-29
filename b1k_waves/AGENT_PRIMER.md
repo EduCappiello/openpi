@@ -63,6 +63,28 @@
 > When the PR merges: `git fetch origin && git merge origin/train` (or rebase the exp
 > branch) and switch back to `train`.
 
+### How to open the pod-compat PR (when allenwang is around)
+
+This repo is a **fork** (`Physical-Intelligence/openpi` → `wensi-ai/openpi` →
+`EduCappiello/openpi`), so GitHub's PR form may pre-fill "base repository" with
+`wensi-ai/openpi` or `Physical-Intelligence/openpi`. **That is wrong for our purposes** —
+the PR must stay inside `EduCappiello/openpi` (the repo allenwang works in). Steps:
+
+1. Open **https://github.com/EduCappiello/openpi/compare/train...exp/pod-compat-2gpu?expand=1**
+   (this URL already has both sides set correctly inside the right repo).
+2. Verify the form reads: **base repository `EduCappiello/openpi` : branch `train`** ←
+   **head repository `EduCappiello/openpi` : branch `exp/pod-compat-2gpu`**.
+   If the base repository shows `wensi-ai/...` or `Physical-Intelligence/...`, change the
+   "base repository" dropdown to `EduCappiello/openpi`.
+3. Title: `pod-compat: 2-GPU values + task0 local paths + accelerate/_CONFIGS fixes`.
+   Body: "Pod-compatibility for the 2xH100 pod (the old 4-GPU pod is gone): 2-GPU hardware
+   values, task0 configs `/mnt/train-data-1-hdd` paths -> local `./outputs/...`, added
+   `accelerate` to deps (the lerobot fork imports it at module load), fixed a duplicated
+   `_CONFIGS` line. No new training method or checkpoint. Verified with a 100-step smoke
+   run on 2xH100 (exit 0, val_loss logged)."
+4. Create the PR and tag allenwang. He reviews + merges; then:
+   `git fetch origin && git checkout train && git merge origin/train`.
+
 ### 🚦 Branching & PR policy (2026-08-28, from allenwang)
 
 Training and evaluation are being kept isolated. `train` is the **training** branch and is
